@@ -354,3 +354,56 @@ a couple of goes).
 
 Any settings sent by the app won't actually change state for now, but it can
 be useful for sniffing the app.
+
+## Auxiliary Scripts
+
+The `scripts/` directory contains two maintenance scripts for Raspberry Pi deployments.
+Both use `systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt` (never a direct
+restart) so the car's WiFi driver has time to settle between operations.
+
+**Before deploying either script**, edit the configuration variables at the top of the file:
+- `NETWORK_NAME` — your car's WiFi SSID (format `REMOTE<id>`, visible in your car's WiFi setup menu)
+- `NETWORK_PASSWORD` — the WiFi password from your car's setup screen
+
+### scripts/phev_wifi_monitor.sh
+
+WiFi watchdog that recovers from common failure modes automatically.
+
+What it does:
+- If the car's SSID is visible but not connected → reconnects via nmcli
+- If connected but the car's gateway (`192.168.8.46`) is unreachable → reconnects
+- If connected and reachable but phev2mqtt has no active TCP session → restarts the service
+- If a TCP session exists but no data has been received in 5 minutes → restarts the service
+
+Uses a lock file (`/tmp/phev_wifi_monitor.lock`) to prevent parallel runs.
+
+**Deploy:**
+```sh
+sudo cp scripts/phev_wifi_monitor.sh /home/pi/phev_wifi_monitor.sh
+# Edit NETWORK_NAME and NETWORK_PASSWORD at the top
+sudo chmod +x /home/pi/phev_wifi_monitor.sh
+# Add to root crontab (sudo crontab -e):
+# */15 * * * * /home/pi/phev_wifi_monitor.sh
+```
+
+### scripts/phev_conditional_reboot.sh
+
+Daily maintenance reboot that only fires when the car is not connected.
+
+Rebooting the Pi once per day resets the WiFi driver and clears accumulated kernel
+state that can cause silent connection failures after many days of uptime. The reboot
+is deferred in 30-minute increments until the car is absent, so it never interrupts
+an active session.
+
+Also uses the same lock file as the watchdog to prevent concurrent execution.
+
+**Deploy:**
+```sh
+sudo cp scripts/phev_conditional_reboot.sh /usr/local/bin/phev-conditional-reboot.sh
+# Edit NETWORK_NAME at the top
+sudo chmod +x /usr/local/bin/phev-conditional-reboot.sh
+# Add to root crontab (sudo crontab -e), staggered from the watchdog:
+# 2,32 * * * * /usr/local/bin/phev-conditional-reboot.sh
+```
+
+**Logs** for both scripts are written to `/var/log/phev_wifi_monitor.log`.

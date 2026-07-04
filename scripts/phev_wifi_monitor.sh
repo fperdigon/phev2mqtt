@@ -1,0 +1,117 @@
+#!/bin/bash
+# WiFi watchdog for phev2mqtt — runs every 15 minutes via cron.
+#
+# Monitors the car's WiFi connection and restarts phev2mqtt when the TCP
+# session to the car is missing or has gone silent.
+#
+# Cron entry (run as root):
+#   */15 * * * * /path/to/phev_wifi_monitor.sh
+#
+# Configuration: edit the variables below before deploying.
+
+# SSID of your car's WiFi hotspot (format: REMOTE<id>, shown in your car's menu)
+NETWORK_NAME="REMOTE<id>"
+
+# WiFi password printed on the car's WiFi setup screen (or your car manual)
+NETWORK_PASSWORD="your-car-wifi-password"
+
+# Car's onboard hotspot gateway — default 192.168.8.46 for Mitsubishi Outlander PHEV
+TARGET_IP=192.168.8.46
+TARGET_PORT=8080
+
+# WiFi interface name on the Raspberry Pi
+INTERFACE=wlan0
+
+LOGFILE=/var/log/phev_wifi_monitor.log
+LOCKFILE=/tmp/phev_wifi_monitor.lock
+
+# Max ms since last data received before considering TCP session stale.
+# Car sends PINGs every ~1s; 5 minutes of silence = dead socket.
+STALE_THRESHOLD_MS=300000
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOGFILE"
+}
+
+# Prevent parallel runs if a previous instance is still running
+exec 9>"$LOCKFILE"
+if ! flock -n 9; then
+    log "Already running, exiting."
+    exit 1
+fi
+
+restart_wifi() {
+    log "Reconnecting $INTERFACE to $NETWORK_NAME..."
+    nmcli device disconnect "$INTERFACE" 2>/dev/null || true
+    sleep 3
+
+    # Primary: let NM autoconnect using the saved profile (reads PSK from
+    # /etc/NetworkManager/system-connections/${NETWORK_NAME}.nmconnection).
+    # NM fires autoconnect within ~1s of disconnect.
+    local i=0
+    while [ $i -lt 10 ]; do
+        sleep 3
+        if nmcli -t -f NAME,STATE connection show --active | grep -q "^$NETWORK_NAME:activated"; then
+            log "Reconnected to $NETWORK_NAME. Restarting phev2mqtt..."
+            sleep 3
+            systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+            return
+        fi
+        i=$((i+1))
+    done
+
+    # Fallback: explicit connect with password (used if saved profile is missing)
+    log "Autoconnect did not fire — trying explicit connect..."
+    if nmcli device wifi connect "$NETWORK_NAME" password "$NETWORK_PASSWORD" ifname "$INTERFACE" 2>/dev/null; then
+        log "Reconnected (explicit) to $NETWORK_NAME. Restarting phev2mqtt..."
+        sleep 3
+        systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+    else
+        log "Failed to connect to $NETWORK_NAME."
+    fi
+}
+
+restart_if_stuck() {
+    # Primary check: is there an active TCP session to the car at all?
+    active_conn=$(ss -tn state established dst "$TARGET_IP:$TARGET_PORT" 2>/dev/null | grep -c "$TARGET_IP")
+    if [ "$active_conn" -eq 0 ]; then
+        log "WiFi up and car reachable, but phev2mqtt has no active TCP connection. Restarting..."
+        systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+        return
+    fi
+
+    # Secondary check: is data actually flowing on that TCP session?
+    # ss -ti reports lastrcv = ms since last byte received from the car.
+    # If it exceeds the stale threshold the socket is alive but silent — restart.
+    lastrcv=$(ss -ti state established dst "$TARGET_IP:$TARGET_PORT" 2>/dev/null | grep -oP 'lastrcv:\K[0-9]+' | head -1)
+    if [ -n "$lastrcv" ] && [ "$lastrcv" -gt "$STALE_THRESHOLD_MS" ]; then
+        log "TCP session exists but no data received from car in $((lastrcv/1000))s. Restarting phev2mqtt..."
+        systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+        return
+    fi
+
+    log "All OK: connected to $NETWORK_NAME, $TARGET_IP reachable, phev2mqtt TCP session active."
+}
+
+# Force a fresh scan before checking
+nmcli device wifi rescan ifname "$INTERFACE" 2>/dev/null
+sleep 3
+
+network_status=$(nmcli -t -f NAME,STATE connection show --active | grep "^$NETWORK_NAME:")
+
+if [ -z "$network_status" ]; then
+    available=$(nmcli device wifi list ifname "$INTERFACE" | grep "$NETWORK_NAME")
+    if [ -n "$available" ]; then
+        log "$NETWORK_NAME visible but not connected. Reconnecting..."
+        restart_wifi
+    else
+        log "$NETWORK_NAME not detected. Car may be out of range or off."
+    fi
+else
+    if ! ping -c 3 -W 2 "$TARGET_IP" > /dev/null 2>&1; then
+        log "Connected to $NETWORK_NAME but cannot reach $TARGET_IP. Reconnecting..."
+        restart_wifi
+    else
+        restart_if_stuck
+    fi
+fi
