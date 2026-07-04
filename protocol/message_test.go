@@ -2,8 +2,9 @@ package protocol
 
 import (
 	"encoding/hex"
-	"gopkg.in/d4l3k/messagediff.v1"
 	"testing"
+
+	"gopkg.in/d4l3k/messagediff.v1"
 )
 
 func TestDecodeEncodeBytes(t *testing.T) {
@@ -115,5 +116,165 @@ func TestDecodeEncodeBytes(t *testing.T) {
 				t.Fatalf("EncodeToBytes: Unexpected. got=%s want=%s", gotData, test.in)
 			}
 		})
+	}
+}
+
+// TestNewFromBytesMultiFrame verifies that two back-to-back frames in a
+// single TCP read are both decoded.
+func TestNewFromBytesMultiFrame(t *testing.T) {
+	// Two valid zero-XOR frames concatenated.
+	// Frame 1: f6 04 00 06 03 03
+	// Frame 2: f6 04 00 06 03 03
+	raw, _ := hex.DecodeString("f60400060303f60400060303")
+	key := &SecurityKey{keyMap: []byte{0x00, 0x00}}
+	msgs := NewFromBytes(raw, key)
+	if len(msgs) != 2 {
+		t.Fatalf("NewFromBytes: got %d messages, want 2", len(msgs))
+	}
+}
+
+// TestNewFromBytesKeyProtection verifies that a misaligned CmdInMy18StartReq
+// frame (offset > 0) does not corrupt the live SecurityKey.
+func TestNewFromBytesKeyProtection(t *testing.T) {
+	// Build a synthetic buffer: 1 junk byte followed by a valid CmdInMy18StartReq
+	// (0x5e) frame with a known key-update packet, followed by a normal frame.
+	//
+	// Start18 raw (zero XOR):  5e 0c 00 01 be cf e9 ad ad a5 15 8b 01 81
+	// After key.Update() with this raw packet, keyMap[0] = 246.
+	//
+	// We prepend 0xff as a junk byte so the scanner must skip 1 byte (offset=1)
+	// to find the Start18. The live key should NOT be updated.
+
+	start18Hex := "5e0c0001becfe9adada5158b0181"
+	pingHex := "f60400060303" // a simple zero-XOR frame after
+
+	junk := []byte{0xff}
+	start18, _ := hex.DecodeString(start18Hex)
+	ping, _ := hex.DecodeString(pingHex)
+
+	raw := append(junk, start18...)
+	raw = append(raw, ping...)
+
+	key := &SecurityKey{keyMap: make([]byte, 256)}
+	for i := range key.keyMap {
+		key.keyMap[i] = byte(i)
+	}
+	origKeyMap0 := key.keyMap[0] // should stay 0x00
+
+	msgs := NewFromBytes(raw, key)
+	// We get 2 messages: the misaligned Start18 and the ping.
+	if len(msgs) < 1 {
+		t.Fatalf("expected at least 1 message, got 0")
+	}
+
+	// The live key must NOT have been mutated by the Start18 at offset 1.
+	if key.keyMap[0] != origKeyMap0 {
+		t.Errorf("live key was mutated by misaligned Start18: keyMap[0] got=%d want=%d",
+			key.keyMap[0], origKeyMap0)
+	}
+}
+
+// TestNewFromBytesNoDoubleXOR verifies that the round-trip through
+// NewFromBytes → EncodeToBytes is idempotent (no double-XOR corruption).
+func TestNewFromBytesNoDoubleXOR(t *testing.T) {
+	// XOR'd frame: xor=0xf0, decoded=f6 04 00 06 03 03
+	rawHex := "06f4f0f6f3f3"
+	raw, _ := hex.DecodeString(rawHex)
+	key := &SecurityKey{keyMap: []byte{0xf0, 0xa5}}
+
+	msgs := NewFromBytes(raw, key)
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	m := msgs[0]
+	if m.Type != 0xf6 {
+		t.Errorf("Type: got=0x%02x want=0xf6", m.Type)
+	}
+	if hex.EncodeToString(m.Original) != "f60400060303" {
+		t.Errorf("Original: got=%s want=f60400060303", hex.EncodeToString(m.Original))
+	}
+	if hex.EncodeToString(m.OriginalXored) != rawHex {
+		t.Errorf("OriginalXored: got=%s want=%s", hex.EncodeToString(m.OriginalXored), rawHex)
+	}
+}
+
+func TestRegisterChargeStatusDecode(t *testing.T) {
+	tests := []struct {
+		name          string
+		data          []byte
+		wantCharging  bool
+		wantRemaining int
+	}{
+		{
+			name:          "not charging, 0xff sentinel",
+			data:          []byte{0x00, 0x00, 0xff},
+			wantCharging:  false,
+			wantRemaining: 0,
+		},
+		{
+			name:          "charging, 45 minutes",
+			data:          []byte{0x01, 0x2d, 0x00},
+			wantCharging:  true,
+			wantRemaining: 0x002d, // 45
+		},
+		{
+			name:          "charging, multi-byte remaining",
+			data:          []byte{0x01, 0x20, 0x01},
+			wantCharging:  true,
+			wantRemaining: 0x0120, // 288
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &PhevMessage{
+				Register: ChargeStatusRegister,
+				Data:     tt.data,
+			}
+			reg := &RegisterChargeStatus{}
+			reg.Decode(msg)
+			if reg.Charging != tt.wantCharging {
+				t.Errorf("Charging: got=%v want=%v", reg.Charging, tt.wantCharging)
+			}
+			if reg.Remaining != tt.wantRemaining {
+				t.Errorf("Remaining: got=%d want=%d", reg.Remaining, tt.wantRemaining)
+			}
+		})
+	}
+}
+
+func TestRegisterDoorStatusDecode(t *testing.T) {
+	// Data layout: [0]=locked [3]=driver [4]=frontPassenger [5]=rearRight
+	//              [6]=rearLeft [7]=boot [8]=bonnet [9]=headlights
+	data := []byte{0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01}
+	msg := &PhevMessage{
+		Register: DoorStatusRegister,
+		Data:     data,
+	}
+	reg := &RegisterDoorStatus{}
+	reg.Decode(msg)
+
+	if !reg.Locked {
+		t.Error("Locked: want true")
+	}
+	if !reg.Driver {
+		t.Error("Driver: want true")
+	}
+	if reg.FrontPassenger {
+		t.Error("FrontPassenger: want false")
+	}
+	if !reg.RearRight {
+		t.Error("RearRight: want true")
+	}
+	if reg.RearLeft {
+		t.Error("RearLeft: want false")
+	}
+	if !reg.Boot {
+		t.Error("Boot: want true")
+	}
+	if reg.Bonnet {
+		t.Error("Bonnet: want false")
+	}
+	if !reg.Headlights {
+		t.Error("Headlights: want true")
 	}
 }
