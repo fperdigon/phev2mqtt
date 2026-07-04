@@ -8,6 +8,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/buxtronix/phev2mqtt/protocol"
@@ -81,7 +82,7 @@ type Client struct {
 	// Keep track of the model year so we can use the correct registers
 	ModelYear ModelYear
 
-	closed bool
+	closed atomic.Bool
 }
 
 // An Option configures the client.
@@ -136,7 +137,7 @@ func (c *Client) RemoveListener(l *Listener) {
 
 // Close closes the client.
 func (c *Client) Close() error {
-	c.closed = true
+	c.closed.Store(true)
 	if c.conn == nil {
 		return nil
 	}
@@ -150,7 +151,7 @@ func (c *Client) Connect() error {
 		return err
 	}
 	log.Info("%PHEV_TCP_CONNECTED%")
-	c.closed = false
+	c.closed.Store(false)
 	c.conn = conn
 	go c.reader()
 	go c.writer()
@@ -244,7 +245,7 @@ func (c *Client) pinger() {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for t := range ticker.C {
-		if c.closed {
+		if c.closed.Load() {
 			return
 		}
 		if t.Sub(c.lastRx) < 500*time.Millisecond {
@@ -319,7 +320,7 @@ func (c *Client) reader() {
 		data := make([]byte, 4096)
 		n, err := c.conn.Read(data)
 		if err != nil {
-			if !c.closed {
+				if !c.closed.Load() {
 				log.Debug("%%PHEV_TCP_READER_ERROR%%: ", err)
 			}
 			log.Debug("%PHEV_TCP_READER_CLOSE%")
@@ -328,6 +329,7 @@ func (c *Client) reader() {
 			c.lMu.Lock()
 			for _, l := range c.listeners {
 				l.Stop()
+				l.ProcessStop()
 			}
 			c.lMu.Unlock()
 			return
@@ -362,7 +364,7 @@ func (c *Client) writer() {
 			log.Tracef("%%PHEV_TCP_SEND_DATA%%: %s", hex.EncodeToString(data))
 			c.conn.(*net.TCPConn).SetWriteDeadline(time.Now().Add(15 * time.Second))
 			if _, err := c.conn.Write(data); err != nil {
-				if !c.closed {
+				if !c.closed.Load() {
 					log.Errorf("%%PHEV_TCP_WRITER_ERROR%%: %v", err)
 				}
 				log.Debug("%PHEV_TCP_WRITER_CLOSE%")
