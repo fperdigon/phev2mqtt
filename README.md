@@ -94,7 +94,18 @@ be used to control certain aspects of the vehicle.
 
 Start the MQTT gateway with:
 
-`./phev2mqtt client mqtt --mqtt_server tcp://<your_mqtt_address:1883/ [--mqtt_username <mqtt_username>] [--mqtt_password <mqtt_password>]`
+`./phev2mqtt client mqtt --mqtt_server tcp://<your_mqtt_address>:1883/ [--mqtt_username <username>] [--mqtt_password <password>]`
+
+Key optional flags:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--mqtt_client_id` | `phev2mqtt` | MQTT client ID — must be unique per broker if running multiple instances |
+| `--mqtt_topic_prefix` | `phev` | Prefix for all published topics |
+| `--mqtt_disable_register_set_command` | `false` | Disable raw register writes via MQTT (safer for production) |
+| `--ha_discovery` | `true` | Enable/disable Home Assistant auto-discovery |
+| `--update_interval` | `5m` | How often to request a full state refresh from the car |
+| `--wifi_restart_command` | *(empty)* | Shell command to restart WiFi if car connection is lost (empty = disabled) |
 
 The following topics are published:
 
@@ -103,13 +114,12 @@ The following topics are published:
 | phev/register/[register] | Raw values of each register, as hex strings |
 | phev/available | Wifi connection status to car. *online* or *offline* |
 | phev/battery/level | Current drive battery level as a percent |
-| phev/climate/status | Whether the car AC is on |
-| phev/climate/mode | Mode of the AC, if on. *cool*, *heat*, *windscreen* |
-| phev/climate/[mode] | Alternative of above. Modes are *cool*, *heat*, *windscreen* which can be *off* or *on* |
+| phev/climate/state | Combined AC state. *off*, *cool*, *heat*, *windscreen*, or *terminated* |
+| phev/climate/[mode] | Per-mode state. Modes are *cool*, *heat*, *windscreen*, each *on* or *off* |
 | phev/charge/charging | Whether the battery is charging. *on* or *off* |
 | phev/charge/plug | If the charging plug is *unplugged* or *connected*. |
 | phev/charge/remaining | Minutes left, if charging. |
-| phev/door/locked | Whether the car is locked. *on* or *off* |
+| phev/door/locked | Whether the car is locked. *closed* = locked, *open* = unlocked |
 | ~~phev/door/front_left~~ | State of doors. *closed* or *open* |
 | ~~phev/door/front_right~~ | State of doors. *closed* or *open* |
 | phev/door/front_passenger | State of doors. *closed* or *open* |
@@ -141,9 +151,7 @@ The following topics are subscribed to and can be used to change state on the ca
 
 The client supports [Home Assistant MQTT Discovery](https://www.home-assistant.io/docs/mqtt/discovery/) by default.
 
-After initial discovery, re-run the binary for the entities to appear. You can
-search for "phev" in your entity list. Your car should also appear as a device
-in the Devices tab.
+Entities are registered automatically on first connection and re-registered after every MQTT broker restart — no manual restart needed. Search for "phev" in your entity list; your car should also appear as a device in the Devices tab.
 
 You can disable this with `--ha_discovery=false` or change the discovery prefix, the default is `--ha_discovery_prefix=homeassistant`.
 
@@ -151,6 +159,12 @@ You can disable this with `--ha_discovery=false` or change the discovery prefix,
 
 It's useful to have the tool auto-start when running on e.g a Raspberry Pi. The following
 describes how to set this up.
+
+> **Important — MAC address:** The car stores the MAC address of the WiFi client
+> that registered with it. It will **only accept connections from that exact MAC**.
+> If your Pi uses MAC randomisation, you must disable it. If you need to use a
+> specific MAC (e.g. when routing through a gateway), set it up *before* running
+> `phev2mqtt client register` so the car stores the right address.
 
 - Edit or add to `/etc/systemd/network/00-default.link` with the following:
 
@@ -186,29 +200,35 @@ suit your setup:
 
 ```
 [Unit]
-Description=phev2mqtt service script
-StartLimitIntervalSec=5
-After=syslog.target network.target
+Description=phev2mqtt PHEV to MQTT gateway
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/phev2mqtt --config=/dev/null client mqtt --mqtt_server tcp://192.168.0.88:1883 -v=debug
+# Wait 20s before connecting — prevents a "bad sum" loop when the Pi
+# reconnects too quickly after a reboot before the car's TCP stack is ready.
+ExecStartPre=/bin/sleep 20
+ExecStart=/usr/local/bin/phev2mqtt client mqtt \
+    --mqtt_server tcp://192.168.0.88:1883 \
+    --mqtt_username <mqtt_username> \
+    --mqtt_password <mqtt_password>
 
-# Restart script if stopped
 Restart=always
-# Wait 30s before restart
-RestartSec=30s
+RestartSec=5s
 
-# Tag things in the log
-# View with: sudo journalctl -f -u phev2mqtt -o cat
 SyslogIdentifier=phev2mqtt
-
-StandardOutput=syslog
-StandardError=syslog
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+> **Important:** The `ExecStartPre=/bin/sleep 20` delay is essential. Without it,
+> if the Pi reboots while the car is parked nearby, phev2mqtt reconnects before
+> the car's session has fully reset, causing the car to repeatedly reject frames
+> with "bad checksum" errors for hours.
 
 - Copy the `phev2mqtt` binary to /usr/local/bin and make sure it's executable.
 
@@ -222,6 +242,74 @@ have the IP address `192.168.8.47`.
 
 - Verify that the phev2mqtt service is communicating with the car, by checking
 the logs: `sudo journalctl -f -u phev2mqtt -o cat`
+
+
+## Running the tests
+
+The test suite covers the protocol framing/decoding layer and the MQTT bridge logic.
+
+```bash
+go test ./...
+```
+
+To see per-test output:
+
+```bash
+go test ./... -v
+```
+
+To run only protocol tests:
+
+```bash
+go test ./protocol/... -v
+```
+
+To run only MQTT bridge tests:
+
+```bash
+go test ./cmd/... -v
+```
+
+The tests do not require a real car or MQTT broker — all protocol tests use
+pre-recorded hex frames as test vectors, and the MQTT tests exercise the
+logic directly against the internal structs.
+
+
+## Troubleshooting
+
+### Entities unavailable in Home Assistant after HA or broker restart
+
+Home Assistant MQTT discovery messages are now published with `retain=true` and
+are automatically re-sent after every broker reconnect. If entities still go
+unavailable, check:
+- The MQTT broker is reachable (`phev/available` topic should show `online`)
+- `phev2mqtt` is running: `sudo systemctl status phev2mqtt`
+
+### "Bad sum" loop — car not connecting after Pi reboot
+
+Symptom: logs show repeated `Bad sum` messages; the car never transitions to
+normal register updates.
+
+Cause: the Pi reconnected to the car too quickly after a reboot, before the
+car's TCP session fully reset.
+
+Fix: ensure `ExecStartPre=/bin/sleep 20` is in your systemd service file (see
+setup above). A 20-second delay before first connection is enough to avoid this.
+
+### Stops working after a day / needs manual restart
+
+If phev2mqtt loses connection to the car's WiFi and cannot recover, check:
+- The car's WiFi goes to sleep when the car is locked and idle for a while
+  — this is normal. phev2mqtt will reconnect when the car wakes (e.g. when
+  you open the door).
+- If connection never recovers, use `--wifi_restart_command` to automatically
+  cycle the WiFi interface on the Pi after a configurable idle period.
+
+### "Connection closed" immediately after connecting
+
+- Ensure the Pi is registered with the car (`phev2mqtt client register`)
+- Verify only one client is connecting at a time (the car only allows one)
+- Check that no other app (e.g. the Mitsubishi phone app) is connected
 
 ### Sniffing the official client
 
