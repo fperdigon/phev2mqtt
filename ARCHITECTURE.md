@@ -5,10 +5,10 @@
 `phev2mqtt` is a Go program that bridges a **Mitsubishi Outlander PHEV** to an
 **MQTT broker** (and optionally Home Assistant via auto-discovery). It runs on a
 Raspberry Pi 3B that connects to the car's Wi-Fi access point
-(`REMOTE47fcta / 192.168.8.46:8080`).
+(`REMOTE<id> / 192.168.8.46:8080`).
 
 ```
-Car WiFi AP (192.168.8.46:8080)
+Car WiFi AP (192.168.8.46:8080, SSID REMOTE<id>)
         │ TCP
         ▼
   ┌─────────────┐   Recv channel   ┌──────────────┐
@@ -236,5 +236,5 @@ Restart=always
 
 The 20-second pre-sleep prevents the car's TCP stack from rejecting the
 connection when the Pi reconnects too quickly after a reboot (the car stores
-the Raspberry Pi's MAC address `b8:27:eb:c1:89:60` for security and will not
+the Raspberry Pi's MAC address `<rpi-mac-address>` for security and will not
 accept connections from any other MAC).
