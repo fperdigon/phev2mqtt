@@ -534,13 +534,15 @@ func (r *RegisterACMode) Decode(m *PhevMessage) {
 	}
 	switch m.Data[0] & 0x0f {
 	case 0:
-		r.Mode = "unknown"
+		r.Mode = "off"
 	case 1:
 		r.Mode = "cool"
 	case 2:
 		r.Mode = "heat"
 	case 3:
 		r.Mode = "windscreen"
+	default:
+		r.Mode = "unknown"
 	}
 	switch m.Data[0] & 0xf0 {
 	case 0x00:
@@ -574,7 +576,7 @@ func (r *RegisterChargePlug) Decode(m *PhevMessage) {
 	if len(m.Data) != 2 {
 		return
 	}
-	r.Connected = (m.Data[1] == 1 || m.Data[0] > 0)
+	r.Connected = (m.Data[1] > 0 || m.Data[0] > 0)
 	r.raw = m.Data
 }
 

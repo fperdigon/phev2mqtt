@@ -92,18 +92,16 @@ func (c *climate) ready() bool {
 	return c.mode != nil && c.state != nil
 }
 
-var lastWifiRestart time.Time
-
-func restartWifi(cmd *cobra.Command) error {
+func (m *mqttClient) restartWifi(cmd *cobra.Command) error {
 	restartRetryTime, err := cmd.Flags().GetDuration("wifi_restart_retry_time")
 	if err != nil {
 		return err
 	}
-	if time.Now().Sub(lastWifiRestart) < restartRetryTime {
+	if time.Now().Sub(m.lastWifiRestart) < restartRetryTime {
 		return nil
 	}
 	defer func() {
-		lastWifiRestart = time.Now()
+		m.lastWifiRestart = time.Now()
 	}()
 
 	restartCommand, _ := cmd.Flags().GetString("wifi_restart_command")
@@ -135,8 +133,10 @@ type mqttClient struct {
 	haDiscovery       bool
 	haDiscoveryPrefix string
 
-	climate *climate
-	enabled bool
+	climate             *climate
+	enabled             bool
+	lastWifiRestart     time.Time
+	publishedDiscovery  bool
 }
 
 func (m *mqttClient) topic(topic string) string {
@@ -170,6 +170,10 @@ func (m *mqttClient) Run(cmd *cobra.Command, args []string) error {
 		SetUsername(mqttUsername).
 		SetPassword(mqttPassword).
 		SetAutoReconnect(true).
+		SetOnConnectHandler(func(_ mqtt.Client) {
+			// Re-publish HA discovery after every broker reconnect.
+			m.publishedDiscovery = false
+		}).
 		SetDefaultPublishHandler(m.handleIncomingMqtt).
 		SetWill(m.topic("/available"), "offline", 0, true)
 
@@ -198,7 +202,7 @@ func (m *mqttClient) Run(cmd *cobra.Command, args []string) error {
 			}
 			// Restart Wifi interface if > wifi_restart_time.
 			if wifiRestartTime > 0 && time.Now().Sub(m.lastConnect) > wifiRestartTime {
-				if err := restartWifi(cmd); err != nil {
+				if err := m.restartWifi(cmd); err != nil {
 					log.Errorf("Error restarting wifi: %v", err)
 				}
 			}
@@ -266,7 +270,7 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 		values := map[string]byte{"on": 0x1, "off": 0x2}
 		if v, ok := values[strings.ToLower(string(msg.Payload()))]; ok {
 			if err := m.phev.SetRegister(0xa, []byte{v}); err != nil {
-				log.Infof("Error setting register 0xb: %v", err)
+				log.Infof("Error setting register 0xa: %v", err)
 				return
 			}
 		}
@@ -283,7 +287,7 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 		topic := msg.Topic()
 		payload := strings.ToLower(string(msg.Payload()))
 
-		modeMap := map[string]byte{"off": 0x0, "OFF": 0x0, "cool": 0x1, "heat": 0x2, "windscreen": 0x3, "mode": 0x4}
+		modeMap := map[string]byte{"off": 0x0, "cool": 0x1, "heat": 0x2, "windscreen": 0x3, "mode": 0x4}
 		durMap := map[string]byte{"10": 0x0, "20": 0x10, "30": 0x20, "on": 0x0, "off": 0x0}
 		parts := strings.Split(topic, "/")
 		mode, ok := modeMap[parts[len(parts)-1]]
@@ -471,16 +475,12 @@ func (m *mqttClient) publishRegister(msg *protocol.PhevMessage) {
 	}
 }
 
-// Publish home assistant discovery message.
-// Uses the vehicle VIN, so sent after VIN discovery.
-var publishedDiscovery = false
-
 func (m *mqttClient) publishHomeAssistantDiscovery(vin, topic, name string) {
 
-	if publishedDiscovery || !m.haDiscovery {
+	if m.publishedDiscovery || !m.haDiscovery {
 		return
 	}
-	publishedDiscovery = true
+	m.publishedDiscovery = true
 	discoveryData := map[string]string{
 		// Doors.
 		"%s/binary_sensor/%s_door_locked/config": `{
@@ -783,7 +783,7 @@ func (m *mqttClient) publishHomeAssistantDiscovery(vin, topic, name string) {
 		for in, out := range mappings {
 			d = strings.Replace(d, in, out, -1)
 		}
-		m.client.Publish(topic, 0, false, d)
+		m.client.Publish(topic, 0, true, d)
 	}
 }
 
