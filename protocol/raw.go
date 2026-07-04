@@ -1,17 +1,41 @@
 package protocol
 
 import (
+	"crypto/rand"
 	"encoding/hex"
-	"fmt"
 	log "github.com/sirupsen/logrus"
+)
+
+type SecurityState int
+
+const (
+	SecurityEmpty = iota
+	SecurityKeyProposed
+	SecurityKeyAccepted
 )
 
 // SecurityKey implements the algorithm for the session encoding/decoding
 // keys.
 type SecurityKey struct {
+	State       SecurityState
+	proposedKey []byte
 	securityKey byte
 	keyMap      []byte
 	sNum, rNum  byte
+}
+
+func (s *SecurityKey) GenerateProposal() []byte {
+	s.proposedKey = make([]byte, 8)
+	if _, err := rand.Read(s.proposedKey); err != nil {
+		log.Errorf("%%PHEV_RAND_ERROR%%: %v", err)
+	}
+	s.State = SecurityKeyProposed
+	return s.proposedKey
+}
+
+func (s *SecurityKey) AcceptProposal() {
+	s.Update(append([]byte{0x0, 0x0, 0x0, 0x0}, s.proposedKey...))
+	s.State = SecurityKeyAccepted
 }
 
 // Generate the security keys from the 0x5e/0x4e initialisation
@@ -60,6 +84,24 @@ func (s *SecurityKey) Update(packet []byte) {
 	log.Debugf("%%PHEV_SEC_KEY_UPDATE%% Updated security key")
 }
 
+// Snapshot returns a deep copy of the SecurityKey.
+// Use when decoding frames during framing recovery (offset > 0 in NewFromBytes)
+// so that key mutation on a false-positive frame does not corrupt live state.
+func (s *SecurityKey) Snapshot() *SecurityKey {
+	km := make([]byte, len(s.keyMap))
+	copy(km, s.keyMap)
+	pk := make([]byte, len(s.proposedKey))
+	copy(pk, s.proposedKey)
+	return &SecurityKey{
+		State:       s.State,
+		proposedKey: pk,
+		securityKey: s.securityKey,
+		keyMap:      km,
+		sNum:        s.sNum,
+		rNum:        s.rNum,
+	}
+}
+
 // Fetch and optionally increment the index for the received
 // key (sent from the car). The key is incremented after a packet
 // of type 0x6f is sent from the car. Otherwise the same key index
@@ -106,15 +148,18 @@ func XorMessageWith(message []byte, xor byte) []byte {
 	return msg
 }
 
+// Checksum computes the frame checksum. length is widened to int to avoid
+// wrapping when message[1] is near 0xff. The caller may pass a frame that
+// is missing the trailing checksum byte (as EncodeToBytes does), so we only
+// require length-1 bytes rather than the full length.
 func Checksum(message []byte) byte {
-	length := message[1] + 2
-
+	length := int(message[1]) + 2
+	if len(message) < length-1 {
+		return 0
+	}
 	b := byte(0)
-	for i := byte(0); ; i++ {
-		if i >= length-1 {
-			break
-		}
-		b = (byte)(message[i] + b)
+	for i := 0; i < length-1; i++ {
+		b += message[i]
 	}
 	return b
 }
@@ -133,7 +178,7 @@ func ValidateChecksum(message []byte) bool {
 // plus any trailing data.
 func ValidateAndDecodeMessage(message []byte) ([]byte, byte, []byte) {
 	if len(message) < 4 {
-		fmt.Printf("Short msg\n")
+		log.Debugf("Short msg\n")
 		return nil, 0, nil
 	}
 	xor := message[2]
@@ -142,12 +187,12 @@ func ValidateAndDecodeMessage(message []byte) ([]byte, byte, []byte) {
 		xor ^= 1
 		msg = XorMessageWith(message, xor)
 		if !ValidateChecksum(msg) {
-			fmt.Printf("Bad sum for (%s)\n", hex.EncodeToString(message))
+			log.Debugf("Bad sum for (%s)\n", hex.EncodeToString(message))
 			return nil, 0, nil
 		}
 	}
-	length := msg[1] + 2
-	if len(message) > int(length) {
+	length := int(msg[1]) + 2
+	if len(message) > length {
 		return msg[:length], xor, message[length:]
 	}
 	return msg[:length], xor, nil
