@@ -105,9 +105,17 @@ func runRegister(cmd *cobra.Command, args []string) {
 		}
 	}()
 
-	vin, ok := <-vinCh
-	if !ok {
-		log.Errorf("Client closed before recieving VIN")
+	var vin string
+	select {
+	case v, ok := <-vinCh:
+		if !ok {
+			log.Errorf("Client closed before receiving VIN")
+			return
+		}
+		vin = v
+	case <-time.After(30 * time.Second):
+		log.Errorf("Timed out waiting for VIN from car")
+		cl.Close()
 		return
 	}
 

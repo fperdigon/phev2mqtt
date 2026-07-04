@@ -226,30 +226,45 @@ func (p *PhevMessage) String() string {
 		p.Type, messageStr[p.Type], p.Length, p.Register, hex.EncodeToString(p.Data))
 }
 
+// NewFromBytes parses one or more framed PHEV messages from raw TCP data.
+//
+// When frame alignment is lost (offset > 0), the live SecurityKey is replaced
+// with a snapshot so that a false-positive CmdInMy18StartReq cannot regenerate
+// the keymap and corrupt all subsequent outgoing frames.
 func NewFromBytes(data []byte, key *SecurityKey) []*PhevMessage {
 	msgs := []*PhevMessage{}
 
 	log.Tracef("%%PHEV_DECODE_FROM_BYTES%%: Raw: %s", hex.EncodeToString(data))
 	offset := 0
 	for {
-		dat, xor, rem := ValidateAndDecodeMessage(data[offset:])
-		if len(dat) == 0 {
-			offset += 1
+		decoded, _, rem := ValidateAndDecodeMessage(data[offset:])
+		if len(decoded) == 0 {
+			offset++
 			if offset >= len(data)-6 {
 				break
 			}
 			continue
 		}
-		log.Tracef("%%PHEV_DECODED_FROM_BYTES%%: Raw: %s", hex.EncodeToString(dat))
-		dat = XorMessageWith(dat, xor)
+
+		frameLen := len(decoded)
+		rawFrame := data[offset : offset+frameLen]
+
+		// Protect the live key when scanning past misaligned bytes.
+		// A false-positive Start18 frame at offset > 0 would otherwise
+		// call key.Update() with garbage bytes and corrupt all future
+		// outgoing frame encoding.
+		activeKey := key
+		if offset > 0 {
+			log.Debugf("%%PHEV_FRAMING_SKIP%%: skipped %d bytes to find frame", offset)
+			activeKey = key.Snapshot()
+		}
+
 		p := &PhevMessage{}
-		err := p.DecodeFromBytes(dat, key)
-		p.OriginalXored = data[offset : offset+len(dat)]
-		p.Xor = xor
-		if err != nil {
-			log.Errorf("decode error: %v\n", err)
+		if err := p.DecodeFromBytes(rawFrame, activeKey); err != nil {
+			log.Errorf("decode error: %v", err)
 			break
 		}
+		log.Tracef("%%PHEV_DECODED_FROM_BYTES%%: Raw: %s", hex.EncodeToString(decoded))
 		msgs = append(msgs, p)
 		if len(rem) < 1 {
 			break
@@ -790,13 +805,15 @@ func (r *RegisterACMode) Decode(m *PhevMessage) {
 	}
 	switch m.Data[0] & 0x0f {
 	case 0:
-		r.Mode = "unknown"
+		r.Mode = "off"
 	case 1:
 		r.Mode = "cool"
 	case 2:
 		r.Mode = "heat"
 	case 3:
 		r.Mode = "windscreen"
+	default:
+		r.Mode = "unknown"
 	}
 	switch m.Data[0] & 0xf0 {
 	case 0x00:
@@ -848,7 +865,7 @@ func (r *RegisterChargePlug) Decode(m *PhevMessage) {
 	if len(m.Data) != 2 {
 		return
 	}
-	r.Connected = (m.Data[1] == 1 || m.Data[0] > 0)
+	r.Connected = (m.Data[1] > 0 || m.Data[0] > 0)
 	r.raw = m.Data
 }
 

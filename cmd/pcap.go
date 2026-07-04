@@ -129,7 +129,7 @@ func decodePacket(cmd *cobra.Command, packet gopacket.Packet) {
 	}
 
 	if err := packet.ErrorLayer(); err != nil {
-		log.Errorf("error decoding packet:", err)
+		log.Errorf("error decoding packet: %v", err)
 	}
 }
 

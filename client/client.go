@@ -160,7 +160,10 @@ func (c *Client) Connect() error {
 	return nil
 }
 
-var startTimeout = 20 * time.Second
+// startTimeout is the maximum time to wait for the car to complete the
+// Start18/Start14 handshake. 45 s gives enough headroom for slow WiFi
+// association and TCP connection setup.
+var startTimeout = 45 * time.Second
 
 // Start waits for the client to start.
 func (c *Client) Start() error {
@@ -234,19 +237,24 @@ func (c *Client) nextRecvMsg(deadline time.Time) (*protocol.PhevMessage, error) 
 	}
 }
 
-// Sends periodic pings to the car.
+// pinger sends periodic pings to the car. It uses a non-blocking send so
+// that a stalled writer goroutine does not leak the pinger indefinitely.
 func (c *Client) pinger() {
 	pingSeq := byte(0xa)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for t := range ticker.C {
-		switch {
-		case c.closed:
+		if c.closed {
 			return
-		case t.Sub(c.lastRx) < 500*time.Millisecond:
+		}
+		if t.Sub(c.lastRx) < 500*time.Millisecond {
 			continue
 		}
-		c.Send <- protocol.NewPingRequestMessage(pingSeq)
+		select {
+		case c.Send <- protocol.NewPingRequestMessage(pingSeq):
+		default:
+			// Send buffer full (writer likely stalled); skip this ping.
+		}
 		pingSeq++
 		if pingSeq > 0x63 {
 			pingSeq = 0

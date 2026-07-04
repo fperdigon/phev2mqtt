@@ -34,6 +34,78 @@ func TestSecurityKey(t *testing.T) {
 	}
 }
 
+func TestSecurityKeySnapshot(t *testing.T) {
+	testData, _ := hex.DecodeString("5e0c0001becfe9adada5158b0181")
+	orig := &SecurityKey{}
+	orig.Update(testData)
+	orig.sNum = 5
+	orig.rNum = 3
+
+	snap := orig.Snapshot()
+
+	// Verify snapshot has same values.
+	if snap.securityKey != orig.securityKey {
+		t.Errorf("securityKey mismatch: got=%d want=%d", snap.securityKey, orig.securityKey)
+	}
+	if snap.sNum != orig.sNum {
+		t.Errorf("sNum mismatch: got=%d want=%d", snap.sNum, orig.sNum)
+	}
+	if snap.rNum != orig.rNum {
+		t.Errorf("rNum mismatch: got=%d want=%d", snap.rNum, orig.rNum)
+	}
+	if snap.keyMap[0] != orig.keyMap[0] {
+		t.Errorf("keyMap[0] mismatch: got=%d want=%d", snap.keyMap[0], orig.keyMap[0])
+	}
+
+	// Mutating the snapshot must not affect the original.
+	snap.keyMap[0] = 0xff
+	snap.sNum = 99
+	snap.rNum = 99
+	if orig.keyMap[0] == 0xff {
+		t.Error("snapshot mutation leaked to original keyMap")
+	}
+	if orig.sNum == 99 {
+		t.Error("snapshot mutation leaked to original sNum")
+	}
+
+	// Mutating the original must not affect the snapshot's previous values.
+	orig.keyMap[1] = 0xaa
+	if snap.keyMap[1] == 0xaa {
+		t.Error("original mutation leaked to snapshot keyMap")
+	}
+}
+
+func TestSecurityKeySnapshotEmpty(t *testing.T) {
+	orig := &SecurityKey{}
+	snap := orig.Snapshot()
+	if snap == nil {
+		t.Fatal("Snapshot() of empty key returned nil")
+	}
+	if len(snap.keyMap) != 0 {
+		t.Errorf("expected empty keyMap, got len=%d", len(snap.keyMap))
+	}
+}
+
+func TestGenerateProposalUnique(t *testing.T) {
+	// crypto/rand should produce unique keys across calls.
+	seen := map[string]bool{}
+	for i := 0; i < 10; i++ {
+		sk := &SecurityKey{}
+		prop := sk.GenerateProposal()
+		key := hex.EncodeToString(prop)
+		if seen[key] {
+			t.Errorf("GenerateProposal produced duplicate key: %s", key)
+		}
+		seen[key] = true
+		if len(prop) != 8 {
+			t.Errorf("proposal length: got=%d want=8", len(prop))
+		}
+		if sk.State != SecurityKeyProposed {
+			t.Errorf("State after GenerateProposal: got=%d want=%d", sk.State, SecurityKeyProposed)
+		}
+	}
+}
+
 func TestXorMessage(t *testing.T) {
 	tests := []struct {
 		in, want string
@@ -89,6 +161,46 @@ func TestValidateChecksum(t *testing.T) {
 		})
 	}
 }
+
+func TestChecksum(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		wantSum byte
+	}{
+		{
+			name:    "normal frame",
+			in:      "f60400060303", // last byte is checksum
+			wantSum: 0x03,
+		},
+		{
+			name:    "ack frame",
+			in:      "bb04016cf01c",
+			wantSum: 0x1c,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, _ := hex.DecodeString(tt.in)
+			got := Checksum(data)
+			if got != tt.wantSum {
+				t.Errorf("Checksum() = 0x%02x, want 0x%02x", got, tt.wantSum)
+			}
+		})
+	}
+}
+
+// TestChecksumShortMessage ensures Checksum returns 0 rather than panicking
+// when the message is shorter than the declared length.
+func TestChecksumShortMessage(t *testing.T) {
+	// Craft a message whose length field claims 10 bytes but is only 4.
+	msg := []byte{0xf6, 0x08, 0x00, 0x06}
+	got := Checksum(msg)
+	if got != 0 {
+		t.Errorf("Checksum on short message: got=0x%02x want=0x00", got)
+	}
+}
+
 func TestValidateAndDecodeMessage(t *testing.T) {
 	tests := []struct {
 		in, want, remaining string

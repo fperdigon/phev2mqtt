@@ -37,6 +37,8 @@ updates, displaying them in real-time.`,
 
 func Run(cmd *cobra.Command, args []string) {
 	address, _ := cmd.Flags().GetString("address")
+	wait, _ := cmd.Flags().GetDuration("wait")
+
 	cl, err := client.New(client.AddressOption(address))
 	if err != nil {
 		panic(err)
@@ -51,9 +53,17 @@ func Run(cmd *cobra.Command, args []string) {
 	}
 
 	var registers = map[byte]string{}
+	var timeout <-chan time.Time
+	if wait > 0 {
+		timeout = time.After(wait)
+	}
 
 	for {
 		select {
+		case <-timeout:
+			log.Infof("Wait timeout reached, closing.")
+			cl.Close()
+			return
 		case m, ok := <-cl.Recv:
 			if !ok {
 				log.Infof("Connection closed.")
@@ -93,5 +103,5 @@ func init() {
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
 	// watchCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
-	watchCmd.Flags().DurationP("wait", "w", 60*time.Second, "How long to hold connection open for")
+	watchCmd.Flags().DurationP("wait", "w", 0, "How long to hold connection open (0 = forever)")
 }
