@@ -211,3 +211,40 @@ func TestClimateACModeUnknown(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveClimateMode verifies R4: resolveClimateMode correctly dispatches
+// both direct sub-topic calls (e.g. /set/climate/heat) and the mode topic
+// (/set/climate/mode with a payload naming the mode).
+// Previously "mode" was stored as 0x4 in modeMap as an undocumented sentinel.
+func TestResolveClimateMode(t *testing.T) {
+	cases := []struct {
+		lastPart string
+		payload  string
+		wantMode byte
+		wantOK   bool
+	}{
+		// Direct sub-topics
+		{"heat", "on", 0x2, true},
+		{"cool", "on", 0x1, true},
+		{"windscreen", "on", 0x3, true},
+		{"off", "on", 0x0, true},
+		// /set/climate/mode: payload names the mode
+		{"mode", "heat", 0x2, true},
+		{"mode", "cool", 0x1, true},
+		{"mode", "windscreen", 0x3, true},
+		{"mode", "off", 0x0, true},
+		// /set/climate/mode with unknown payload -> error
+		{"mode", "turbo", 0x0, false},
+		// Unknown sub-topic -> error
+		{"defrost", "on", 0x0, false},
+		// "mode" must NOT appear as a direct sub-topic (no 0x4 sentinel)
+		{"mode", "mode", 0x0, false},
+	}
+	for _, tc := range cases {
+		got, ok := resolveClimateMode(tc.lastPart, tc.payload)
+		if ok != tc.wantOK || got != tc.wantMode {
+			t.Errorf("resolveClimateMode(%q, %q) = (%#x, %v), want (%#x, %v)",
+				tc.lastPart, tc.payload, got, ok, tc.wantMode, tc.wantOK)
+		}
+	}
+}

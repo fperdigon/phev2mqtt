@@ -328,16 +328,14 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 		topic := msg.Topic()
 		payload := strings.ToLower(string(msg.Payload()))
 
-		modeMap := map[string]byte{"off": 0x0, "cool": 0x1, "heat": 0x2, "windscreen": 0x3, "mode": 0x4}
 		durMap := map[string]byte{"10": 0x0, "20": 0x10, "30": 0x20, "on": 0x0, "off": 0x0}
 		parts := strings.Split(topic, "/")
-		mode, ok := modeMap[parts[len(parts)-1]]
+		mode, ok := resolveClimateMode(parts[len(parts)-1], payload)
 		if !ok {
-			log.Errorf("Unknown climate mode: %s", parts[len(parts)-1])
+			log.Errorf("Unknown climate topic/payload: topic=%s payload=%s", parts[len(parts)-1], payload)
 			return
 		}
-		if mode == 0x4 { // set/climate/mode -> "heat"
-			mode = modeMap[payload]
+		if parts[len(parts)-1] == "mode" {
 			payload = "on"
 		}
 		if payload == "off" {
@@ -534,6 +532,20 @@ func (m *mqttClient) publishRegister(msg *protocol.PhevMessage) {
 			m.publish("/charge/plug", "unplugged")
 		}
 	}
+}
+
+// resolveClimateMode maps an MQTT topic last-segment and payload to a
+// protocol mode byte. When lastPart is "mode" the payload names the mode
+// directly (e.g. payload="heat" → 0x2); otherwise lastPart is the mode name.
+// Returns (0, false) for unrecognised inputs.
+func resolveClimateMode(lastPart, payload string) (byte, bool) {
+	modeMap := map[string]byte{"off": 0x0, "cool": 0x1, "heat": 0x2, "windscreen": 0x3}
+	if lastPart == "mode" {
+		m, ok := modeMap[payload]
+		return m, ok
+	}
+	m, ok := modeMap[lastPart]
+	return m, ok
 }
 
 func (m *mqttClient) publishHomeAssistantDiscovery(vin, topic, name string) {
