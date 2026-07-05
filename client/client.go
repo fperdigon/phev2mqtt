@@ -187,6 +187,8 @@ func (c *Client) Start() error {
 }
 
 // SetRegister sets a register on the car.
+// Each attempt gets a fresh 10-second timer; a CmdInBadEncoding reply corrects
+// the XOR byte and retries with a new timeout rather than reusing the original.
 func (c *Client) SetRegister(register byte, value []byte) error {
 	setRegister := func(xor byte) {
 		c.Send <- &protocol.PhevMessage{
@@ -198,27 +200,28 @@ func (c *Client) SetRegister(register byte, value []byte) error {
 		}
 	}
 	xor := byte(0)
-	timer := time.After(10 * time.Second)
 	l := c.AddListener()
 	defer c.RemoveListener(l)
-SETREG:
-	setRegister(xor)
 	for {
-		select {
-		case <-timer:
-			return fmt.Errorf("timed out attempting to set register %02x", register)
-		case msg, ok := <-l.C:
-			if !ok {
-				return fmt.Errorf("listener channel closed")
+		setRegister(xor)
+		timer := time.After(10 * time.Second)
+	attempt:
+		for {
+			select {
+			case <-timer:
+				return fmt.Errorf("timed out attempting to set register %02x", register)
+			case msg, ok := <-l.C:
+				if !ok {
+					return fmt.Errorf("listener channel closed")
+				}
+				if msg.Type == protocol.CmdInBadEncoding {
+					xor = msg.Data[0]
+					break attempt // retry outer loop with a fresh timer
+				}
+				if msg.Type == protocol.CmdInResp && msg.Ack == protocol.Ack && msg.Register == register {
+					return nil
+				}
 			}
-			if msg.Type == protocol.CmdInBadEncoding {
-				xor = msg.Data[0]
-				goto SETREG
-			}
-			if msg.Type == protocol.CmdInResp && msg.Ack == protocol.Ack && msg.Register == register {
-				return nil
-			}
-
 		}
 	}
 }

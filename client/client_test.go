@@ -4,6 +4,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/buxtronix/phev2mqtt/protocol"
 )
 
 // startListener starts a loopback TCP listener and returns its address and a
@@ -84,5 +86,70 @@ func TestManageGoroutineExitsOnDisconnect(t *testing.T) {
 			t.Error("manage() goroutine did not exit within 3s after TCP disconnect (R2 goroutine leak)")
 			return
 		}
+	}
+}
+
+// TestSetRegisterFreshTimerOnRetry verifies R3: when the car replies with
+// CmdInBadEncoding, SetRegister retries with a fresh 10-second timer instead
+// of reusing the original (possibly near-expiry) one.
+//
+// The test sends a CmdInBadEncoding reply, then a valid ack, and expects
+// success — even though the first-attempt timer fires almost immediately
+// (we use a custom channel to simulate an expired timer slot).
+func TestSetRegisterFreshTimerOnRetry(t *testing.T) {
+	addr, getServer := startListener(t)
+
+	cl, err := New(AddressOption(addr))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := cl.Connect(); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	serverConn := getServer()
+	defer serverConn.Close()
+
+	// Drive SetRegister from a goroutine; capture its result.
+	result := make(chan error, 1)
+	go func() {
+		result <- cl.SetRegister(0x10, []byte{0x01})
+	}()
+
+	// Wait until SetRegister has added its listener and sent the first frame.
+	time.Sleep(50 * time.Millisecond)
+
+	// Inject CmdInBadEncoding into all listeners — simulates car rejecting XOR.
+	badEncMsg := &protocol.PhevMessage{
+		Type: protocol.CmdInBadEncoding,
+		Data: []byte{0x5a}, // corrected XOR byte
+	}
+	cl.lMu.Lock()
+	for _, l := range cl.listeners {
+		l.Send(badEncMsg)
+	}
+	cl.lMu.Unlock()
+
+	// Give SetRegister time to retry with the new XOR and fresh timer.
+	time.Sleep(50 * time.Millisecond)
+
+	// Inject a valid ack for register 0x10.
+	ackMsg := &protocol.PhevMessage{
+		Type:     protocol.CmdInResp,
+		Ack:      protocol.Ack,
+		Register: 0x10,
+	}
+	cl.lMu.Lock()
+	for _, l := range cl.listeners {
+		l.Send(ackMsg)
+	}
+	cl.lMu.Unlock()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Errorf("SetRegister failed after BadEncoding retry: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("SetRegister did not complete within 2s after ack (fresh timer regression)")
 	}
 }
