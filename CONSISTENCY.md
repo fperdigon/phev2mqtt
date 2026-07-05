@@ -185,33 +185,29 @@ log aggregation (journald would miss these lines).
 
 ---
 
-## Known Remaining Issues (Not Fixed — Require Larger Refactor)
+## Previously Deferred Issues (Now Fixed)
 
-### R1 — `c.closed` bool is a data race in `client/client.go`
+### R1 — `c.closed` bool was a data race in `client/client.go`
 
-Multiple goroutines (`pinger`, `reader`, `writer`, `Close`) read and write
-`c.closed` without synchronisation. The Go race detector will flag this. Fix
-requires converting to `sync/atomic` or adding a mutex — deferred to avoid
-a larger client.go rewrite.
+**Status: FIXED** — replaced `closed bool` with `atomic.Bool`; all 5 read/write
+sites use `.Load()`/`.Store()`. Test: `TestClosedAtomicNoRace` (run with `-race`
+on any x86 CI; RPi 3B kernel has 39-bit VMA which ThreadSanitizer does not support).
 
-### R2 — `manage()` goroutine leaks after TCP disconnect
+### R2 — `manage()` goroutine leaked after TCP disconnect
 
-When `reader()` exits, it sets `l.stop = true` but does not close `ml.C`.
-The `manage()` goroutine blocks forever on `for m := range ml.C`. These
-goroutines accumulate across reconnect cycles. Fix requires closing `ml.C` from
-the reader's exit path — deferred alongside R1.
+**Status: FIXED** — `reader()` cleanup now calls `l.ProcessStop()` after
+`l.Stop()`, which closes `l.C` and unblocks `manage()`s `for m := range ml.C`.
+Test: `TestManageGoroutineExitsOnDisconnect`.
 
-### R3 — `SetRegister` timer not reset on `goto SETREG` retry
+### R3 — `SetRegister` timer not reset on retry
 
-`time.After(10s)` is created once before the retry label. A `CmdInBadEncoding`
-reply via `goto SETREG` reuses the already-running timer. If the first attempt
-consumed most of the 10 s window, the timer fires almost immediately on retry.
-Low impact in practice (re-encoding is fast), deferred.
+**Status: FIXED** — replaced `goto SETREG` with an outer `for` loop. `timer :=
+time.After(10s)` is now inside the loop so each attempt starts with a fresh
+10-second window. Test: `TestSetRegisterFreshTimerOnRetry`.
 
-### R4 — `"mode": 0x4` in climate `modeMap` is an undocumented sentinel
+### R4 — `"mode": 0x4` in climate `modeMap` was an undocumented sentinel
 
-The value `0x4` is used internally as a sentinel meaning "the `/set/climate/mode`
-topic was written to — look up the actual mode from the payload". It is not a
-protocol register value and has no meaning if accidentally sent to the car.
-The code handles it correctly (`if mode == 0x4 { mode = modeMap[payload] }`),
-but the dual use of the map is confusing and should be refactored.
+**Status: FIXED** — sentinel removed; dispatch extracted to
+`resolveClimateMode(lastPart, payload)` which handles both cases explicitly.
+`modeMap` now contains only the 4 actual protocol byte values (off/cool/heat/windscreen).
+Test: `TestResolveClimateMode`.
