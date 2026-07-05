@@ -3,6 +3,9 @@
 All notable changes to this fork (`fperdigon/phev2mqtt`) relative to the
 upstream (`buxtronix/phev2mqtt`) are documented here.
 
+Issue numbers in parentheses refer to open issues in the
+[upstream repository](https://github.com/buxtronix/phev2mqtt/issues).
+
 ---
 
 ## [Unreleased] — 2026-07-04
@@ -13,12 +16,14 @@ coverage, and operational tooling for long-running Raspberry Pi deployments.
 
 ### Fixed — Protocol / Framing
 
-- **Root cause of "Bad sum" loop** (`protocol/message.go`, `client/client.go`):
+- **Root cause of "Bad sum" loop** (`protocol/message.go`, `client/client.go`)
+  *(addresses [#25](https://github.com/buxtronix/phev2mqtt/issues/25))*:
   `NewFromBytes` was calling `key.Update()` on false-positive frames found at
   non-zero offsets during framing recovery, corrupting the rolling XOR key and
-  causing every subsequent frame to fail checksum. Fix uses `key.Snapshot()` for
-  any frame found at offset > 0 so the live key is never mutated by a
-  speculative decode.
+  causing every subsequent frame to fail checksum — the symptom reported as an
+  endless ping loop with incrementing IDs and repeated "Bad sum" log lines.
+  Fix uses `key.Snapshot()` for any frame found at offset > 0 so the live key
+  is never mutated by a speculative decode.
 - **`Checksum()` byte overflow** (`protocol/raw.go`): length byte was accumulated
   as `byte`, wrapping silently on frames where `message[1]` is near `0xff`. Widened
   to `int`.
@@ -27,9 +32,11 @@ coverage, and operational tooling for long-running Raspberry Pi deployments.
 - **`RegisterChargePlug.Decode` misclassified `0x0002`** (`protocol/message.go`):
   wire value `0x0002` (plug connected, charging pending) decoded as `Connected=false`.
   Fixed condition to `Data[1] > 0 || Data[0] > 0`.
-- **`RegisterACMode` mapped mode 0 to `"unknown"`** (`protocol/message.go`): caused
-  Home Assistant select widget to show a stale/errored state when AC turned off.
-  `case 0` now maps to `"off"`; a `default` case handles genuinely unknown nibbles.
+- **`RegisterACMode` mapped mode 0 to `"unknown"`** (`protocol/message.go`)
+  *(contributes to [#56](https://github.com/buxtronix/phev2mqtt/issues/56))*:
+  caused Home Assistant select widget to show a stale/errored state when AC
+  turned off. `case 0` now maps to `"off"`; a `default` case handles genuinely
+  unknown nibbles.
 - **`NewFromBytes` used `fmt.Printf` for decode errors** (`protocol/message.go`):
   errors bypassed the `logrus` logger and `journald`. Changed to `log.Errorf`.
 
@@ -38,30 +45,40 @@ coverage, and operational tooling for long-running Raspberry Pi deployments.
 - **`c.closed` data race** (`client/client.go`): `pinger`, `reader`, `writer`, and
   `Close`/`Connect` accessed a plain `bool` concurrently. Replaced with
   `sync/atomic.Bool`.
-- **`manage()` goroutine leak** (`client/client.go`): on TCP disconnect, `reader`
-  set `l.stop = true` on all listeners but never closed their channels. `manage()`
-  blocked forever on `for m := range ml.C`, leaking one goroutine per reconnect
-  cycle. Fixed by calling `l.ProcessStop()` (which closes `l.C`) in the cleanup
-  path.
+- **`manage()` goroutine leak** (`client/client.go`)
+  *(contributes to [#34](https://github.com/buxtronix/phev2mqtt/issues/34))*:
+  on TCP disconnect, `reader` set `l.stop = true` on all listeners but never
+  closed their channels. `manage()` blocked forever on `for m := range ml.C`,
+  leaking one goroutine per reconnect cycle. Fixed by calling `l.ProcessStop()`
+  (which closes `l.C`) in the cleanup path.
 - **`SetRegister` timer not reset on retry** (`client/client.go`): `time.After(10s)`
   was created once before a `goto SETREG` label; a `CmdInBadEncoding` reply reused
   the original (possibly near-expiry) timer. Replaced `goto` with an outer `for`
   loop so each attempt gets a fresh 10-second window.
-- **Pinger goroutine leak** (`client/client.go`): pinger used a blocking send on
-  `c.Send`; a stalled writer goroutine would block the pinger indefinitely. Changed
-  to a non-blocking send with a `default` case.
-- **`startTimeout` increased from 20 s to 45 s** (`client/client.go`): the original
-  timeout was too tight for slow WiFi association + TCP setup on some networks.
+- **Pinger goroutine leak** (`client/client.go`)
+  *(contributes to [#34](https://github.com/buxtronix/phev2mqtt/issues/34))*:
+  pinger used a blocking send on `c.Send`; a stalled writer goroutine would block
+  the pinger indefinitely. Changed to a non-blocking send with a `default` case.
+- **`startTimeout` increased from 20 s to 45 s** (`client/client.go`)
+  *(addresses [#59](https://github.com/buxtronix/phev2mqtt/issues/59))*:
+  the original timeout was too tight for slow WiFi association + TCP setup,
+  causing "timed out waiting for start" failures on some hardware configurations.
 
 ### Fixed — MQTT / Home Assistant
 
-- **`publishedDiscovery` was a package-level variable** (`cmd/mqtt.go`): once set
-  to `true` it was never cleared, so HA discovery was never re-sent after a broker
-  restart. Moved to a field on `mqttClient`; a `SetOnConnectHandler` callback resets
-  it on every MQTT reconnect.
-- **HA discovery messages published with `retain=false`** (`cmd/mqtt.go`): entities
-  disappeared from HA permanently if the broker restarted before the car reconnected.
-  Changed to `retain=true`.
+- **`publishedDiscovery` was a package-level variable** (`cmd/mqtt.go`)
+  *(addresses [#54](https://github.com/buxtronix/phev2mqtt/issues/54),
+  contributes to [#56](https://github.com/buxtronix/phev2mqtt/issues/56))*:
+  once set to `true` it was never cleared, so HA discovery was never re-sent
+  after a broker restart — entities became permanently unavailable until
+  phev2mqtt was manually restarted. Moved to a field on `mqttClient`; a
+  `SetOnConnectHandler` callback resets it on every MQTT reconnect.
+- **HA discovery messages published with `retain=false`** (`cmd/mqtt.go`)
+  *(addresses [#54](https://github.com/buxtronix/phev2mqtt/issues/54),
+  contributes to [#56](https://github.com/buxtronix/phev2mqtt/issues/56))*:
+  entities disappeared from HA permanently if the broker restarted before the
+  car reconnected. Changed to `retain=true` so the broker always holds the
+  last discovery payload.
 - **`0x4` sentinel in climate `modeMap`** (`cmd/mqtt.go`): `"mode":0x4` was an
   undocumented internal sentinel mixed into the protocol-value map. Removed;
   extracted `resolveClimateMode(lastPart, payload)` which handles both dispatch
@@ -111,13 +128,15 @@ ThreadSanitizer requires 48-bit). Run `-race` on any x86 CI runner.
 
 ### Added — Scripts
 
-- **`scripts/phev_wifi_monitor.sh`**: WiFi watchdog for Raspberry Pi deployments.
-  Monitors the car's WiFi connection every 15 minutes; reconnects via `nmcli` if
+- **`scripts/phev_wifi_monitor.sh`**: WiFi watchdog for Raspberry Pi deployments
+  *(addresses [#34](https://github.com/buxtronix/phev2mqtt/issues/34))*:
+  monitors the car's WiFi connection every 15 minutes; reconnects via `nmcli` if
   disconnected; restarts `phev2mqtt` if the TCP session is missing or has been
   silent for 5 minutes. Uses a lock file to prevent parallel runs.
-- **`scripts/phev_conditional_reboot.sh`**: daily maintenance reboot that defers
-  until the car is absent, then reboots once per calendar day to reset the WiFi
-  driver. Runs at `:02` and `:32` via root cron, staggered from the watchdog.
+- **`scripts/phev_conditional_reboot.sh`**: daily maintenance reboot
+  *(contributes to [#34](https://github.com/buxtronix/phev2mqtt/issues/34))*:
+  defers until the car is absent, then reboots once per calendar day to reset the
+  WiFi driver. Runs at `:02` and `:32` via root cron, staggered from the watchdog.
   Shares the same lock file to prevent concurrent execution.
 
 Both scripts require configuring `NETWORK_NAME` and (for the watchdog)

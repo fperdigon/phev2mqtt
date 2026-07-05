@@ -11,6 +11,13 @@ Tested against a MY18 vehicle.
 
 ![Home Assistant Screenshot](phev-ha.png)
 
+## Fork Changes (fperdigon)
+
+This repository is a fork of [buxtronix/phev2mqtt](https://github.com/buxtronix/phev2mqtt).
+All changes introduced by [@fperdigon](https://github.com/fperdigon) are documented in
+[CHANGELOG.md](CHANGELOG.md), including bug fixes, reliability improvements, expanded
+test coverage, and Raspberry Pi maintenance scripts.
+
 ## Supported functionality
 
  * MQTT proxy to Phev
