@@ -146,3 +146,35 @@ Both scripts require configuring `NETWORK_NAME` and (for the watchdog)
 
 *For upstream changes prior to `c698b3a`, see the
 [buxtronix/phev2mqtt](https://github.com/buxtronix/phev2mqtt) history.*
+
+## [Unreleased] -- 2026-07-05
+
+### Improved -- Logging
+
+- **Sentinel format consistency** (`client/client.go`, `protocol/raw.go`,
+  `protocol/message.go`): normalised all `%PHEV_*%` log sentinels to the
+  `%%PHEV_FOO%%` style used throughout the codebase; fixed one malformed sentinel
+  (`%PHEV_MANAGER_END%%` had a stray trailing double-percent); converted bare
+  `log.Debug` calls to `log.Debugf` for consistency.
+- **Protocol sentinels** (`protocol/raw.go`, `protocol/message.go`): added
+  `%%PHEV_SHORT_MSG%%`, `%%PHEV_BAD_SUM%%`, and `%%PHEV_DECODE_ERROR%%` sentinels
+  to the framing and checksum paths so they are filterable alongside other PHEV
+  events.
+- **Session-ready Info log** (`client/client.go`): `Start()` now emits
+  `%%PHEV_SESSION_READY%%: model year <n>` at Info level once the security
+  handshake completes, making it easy to distinguish a fully negotiated session
+  from a TCP connection that stalled before the handshake.
+- **Error-level correctness** (`cmd/mqtt.go`): all failure paths in
+  `handleIncomingMqtt` (bad topic format, bad register/payload, failed
+  `SetRegister` calls, AC mode errors, Pre-AC termination ack failure) were
+  incorrectly using `log.Infof`; changed to `log.Errorf` so `grep level=error`
+  reliably captures actionable failures.
+- **Duplicate log removed** (`cmd/mqtt.go`): `handlePhev` was logging
+  `"Connection closed."` at Info before returning the error; `Run()` already
+  logs the returned error at Error level, so the Info log was redundant and
+  caused double entries in the journal.
+- **Redundant debug log removed** (`cmd/mqtt.go`): `restartWifi()` logged
+  `"wifi restart disabled"` at Debug on every call when the command is empty;
+  the startup Info message already covers this.
+- **Typo fix** (`cmd/mqtt.go`): `"vechicle"` -> `"vehicle"` in the
+  `mqtt_disable_register_set_command` flag description and log message.

@@ -123,7 +123,6 @@ func (m *mqttClient) restartWifi(cmd *cobra.Command) error {
 
 	restartCommand := viper.GetString("wifi_restart_command")
 	if restartCommand == "" {
-		log.Debugf("wifi restart disabled")
 		return nil
 	}
 
@@ -209,7 +208,7 @@ func (m *mqttClient) Run(cmd *cobra.Command, args []string) error {
 			return token.Error()
 		}
 	} else {
-		log.Info("Setting vechicle registers via MQTT is disabled")
+		log.Info("Setting vehicle registers via MQTT is disabled")
 	}
 	if token := m.client.Subscribe(m.topic("/connection"), 0, nil); token.Wait() && token.Error() != nil {
 		return token.Error()
@@ -260,21 +259,21 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 	topicParts := strings.Split(msg.Topic(), "/")
 	if strings.HasPrefix(msg.Topic(), m.topic("/set/register/")) {
 		if len(topicParts) != 4 {
-			log.Infof("Bad topic format [%s]", msg.Topic())
+			log.Errorf("Bad topic format [%s]", msg.Topic())
 			return
 		}
 		register, err := hex.DecodeString(topicParts[3])
 		if err != nil {
-			log.Infof("Bad register in topic [%s]: %v", msg.Topic(), err)
+			log.Errorf("Bad register in topic [%s]: %v", msg.Topic(), err)
 			return
 		}
 		data, err := hex.DecodeString(string(msg.Payload()))
 		if err != nil {
-			log.Infof("Bad payload [%s]: %v", msg.Payload(), err)
+			log.Errorf("Bad payload [%s]: %v", msg.Payload(), err)
 			return
 		}
 		if err := m.phev.SetRegister(register[0], data); err != nil {
-			log.Infof("Error setting register %02x: %v", register[0], err)
+			log.Errorf("Error setting register %02x: %v", register[0], err)
 			return
 		}
 	} else if msg.Topic() == m.topic("/connection") {
@@ -295,7 +294,7 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 		values := map[string]byte{"on": 0x1, "off": 0x2}
 		if v, ok := values[strings.ToLower(string(msg.Payload()))]; ok {
 			if err := m.phev.SetRegister(0xb, []byte{v}); err != nil {
-				log.Infof("Error setting register 0xb: %v", err)
+				log.Errorf("Error setting register 0xb: %v", err)
 				return
 			}
 		}
@@ -303,24 +302,24 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 		values := map[string]byte{"on": 0x1, "off": 0x2}
 		if v, ok := values[strings.ToLower(string(msg.Payload()))]; ok {
 			if err := m.phev.SetRegister(0xa, []byte{v}); err != nil {
-				log.Infof("Error setting register 0xa: %v", err)
+				log.Errorf("Error setting register 0xa: %v", err)
 				return
 			}
 		}
 	} else if msg.Topic() == m.topic("/set/cancelchargetimer") {
 		if err := m.phev.SetRegister(0x17, []byte{0x1}); err != nil {
-			log.Infof("Error setting register 0x17: %v", err)
+			log.Errorf("Error setting register 0x17: %v", err)
 			return
 		}
 		if err := m.phev.SetRegister(0x17, []byte{0x11}); err != nil {
-			log.Infof("Error setting register 0x17: %v", err)
+			log.Errorf("Error setting register 0x17: %v", err)
 			return
 		}
 	} else if strings.HasPrefix(msg.Topic(), m.topic("/set/climate/state")) {
 		payload := strings.ToLower(string(msg.Payload()))
 		if payload == "reset" {
 			if err := m.phev.SetRegister(protocol.SetAckPreACTermRegister, []byte{0x1}); err != nil {
-				log.Infof("Error acknowledging Pre-AC termination: %v", err)
+				log.Errorf("Error acknowledging Pre-AC termination: %v", err)
 				return
 			}
 		}
@@ -354,7 +353,7 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 			registerPayload[1] = 0x0
 			registerPayload[6] = mode | duration
 			if err := m.phev.SetRegister(protocol.SetACModeRegisterMY14, registerPayload); err != nil {
-				log.Infof("Error setting AC mode: %v", err)
+				log.Errorf("Error setting AC mode: %v", err)
 				return
 			}
 
@@ -364,7 +363,7 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 				acEnabled = 0x01
 			}
 			if err := m.phev.SetRegister(protocol.SetACEnabledRegisterMY14, []byte{acEnabled}); err != nil {
-				log.Infof("Error setting AC enabled state: %v", err)
+				log.Errorf("Error setting AC enabled state: %v", err)
 				return
 			}
 		} else if m.phev.ModelYear == client.ModelYear18 || m.phev.ModelYear == client.ModelYear24 {
@@ -373,7 +372,7 @@ func (m *mqttClient) handleIncomingMqtt(mqtt_client mqtt.Client, msg mqtt.Messag
 				state = 0x1
 			}
 			if err := m.phev.SetRegister(protocol.SetACModeRegisterMY18, []byte{state, mode, duration, 0x0}); err != nil {
-				log.Infof("Error setting AC mode: %v", err)
+				log.Errorf("Error setting AC mode: %v", err)
 				return
 			}
 		}
@@ -425,7 +424,6 @@ func (m *mqttClient) handlePhev(cmd *cobra.Command) error {
 			}()
 		case msg, ok := <-m.phev.Recv:
 			if !ok {
-				log.Infof("Connection closed.")
 				updaterTicker.Stop()
 				return fmt.Errorf("Connection closed.")
 			}
@@ -902,7 +900,7 @@ func init() {
 	mqttCmd.Flags().String("mqtt_password", "", "Password to login to MQTT server")
 	mqttCmd.Flags().String("mqtt_client_id", "phev2mqtt", "MQTT client ID (must be unique per broker)")
 	mqttCmd.Flags().String("mqtt_topic_prefix", "phev", "Prefix for MQTT topics")
-	mqttCmd.Flags().Bool("mqtt_disable_register_set_command", false, "Disable vechicle register setting via MQTT")
+	mqttCmd.Flags().Bool("mqtt_disable_register_set_command", false, "Disable vehicle register setting via MQTT")
 	mqttCmd.Flags().Bool("ha_discovery", true, "Enable Home Assistant MQTT discovery")
 	mqttCmd.Flags().String("ha_discovery_prefix", "homeassistant", "Prefix for Home Assistant MQTT discovery")
 	mqttCmd.Flags().Duration("update_interval", 5*time.Minute, "How often to request force updates")

@@ -37,7 +37,7 @@ func (l *Listener) Send(m *protocol.PhevMessage) {
 	select {
 	case l.C <- m:
 	default:
-		log.Debug("%PHEV_RECV_LISTENER% message not sent")
+		log.Debugf("%%PHEV_RECV_LISTENER%% message not sent")
 	}
 }
 
@@ -150,7 +150,7 @@ func (c *Client) Connect() error {
 	if err != nil {
 		return err
 	}
-	log.Info("%PHEV_TCP_CONNECTED%")
+	log.Infof("%%PHEV_TCP_CONNECTED%%")
 	c.closed.Store(false)
 	c.conn = conn
 	go c.reader()
@@ -178,6 +178,7 @@ func (c *Client) Start() error {
 				return fmt.Errorf("receiver closed before getting start request")
 			}
 			log.Debug("%%PHEV_START_DONE%%")
+			log.Infof("%%PHEV_SESSION_READY%%: model year %v", c.ModelYear)
 		case <-startTimer:
 			log.Debug("%%PHEV_START_TIMEOUT%%")
 			return fmt.Errorf("timed out waiting for start")
@@ -314,7 +315,7 @@ func (c *Client) manage() {
 		}
 	}
 	close(c.started)
-	log.Debug("%PHEV_MANAGER_END%%")
+	log.Debugf("%%PHEV_MANAGER_END%%")
 }
 
 func (c *Client) reader() {
@@ -326,7 +327,7 @@ func (c *Client) reader() {
 				if !c.closed.Load() {
 				log.Debug("%%PHEV_TCP_READER_ERROR%%: ", err)
 			}
-			log.Debug("%PHEV_TCP_READER_CLOSE%")
+			log.Debugf("%%PHEV_TCP_READER_CLOSE%%")
 			c.Close()
 			close(c.Recv)
 			c.lMu.Lock()
@@ -357,7 +358,7 @@ func (c *Client) writer() {
 		select {
 		case msg, ok := <-c.Send:
 			if !ok {
-				log.Debug("%PHEV_TCP_WRITER_CLOSE%")
+				log.Debugf("%%PHEV_TCP_WRITER_CLOSE%%")
 				c.Close()
 				return
 			}
@@ -370,7 +371,7 @@ func (c *Client) writer() {
 				if !c.closed.Load() {
 					log.Errorf("%%PHEV_TCP_WRITER_ERROR%%: %v", err)
 				}
-				log.Debug("%PHEV_TCP_WRITER_CLOSE%")
+				log.Debugf("%%PHEV_TCP_WRITER_CLOSE%%")
 				c.Close()
 				return
 			}

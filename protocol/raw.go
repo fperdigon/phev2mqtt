@@ -178,7 +178,7 @@ func ValidateChecksum(message []byte) bool {
 // plus any trailing data.
 func ValidateAndDecodeMessage(message []byte) ([]byte, byte, []byte) {
 	if len(message) < 4 {
-		log.Debugf("Short msg\n")
+		log.Debugf("%%PHEV_SHORT_MSG%%")
 		return nil, 0, nil
 	}
 	xor := message[2]
@@ -187,7 +187,7 @@ func ValidateAndDecodeMessage(message []byte) ([]byte, byte, []byte) {
 		xor ^= 1
 		msg = XorMessageWith(message, xor)
 		if !ValidateChecksum(msg) {
-			log.Debugf("Bad sum for (%s)\n", hex.EncodeToString(message))
+			log.Debugf("%%PHEV_BAD_SUM%%: %s", hex.EncodeToString(message))
 			return nil, 0, nil
 		}
 	}

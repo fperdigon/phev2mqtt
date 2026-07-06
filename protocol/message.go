@@ -261,7 +261,7 @@ func NewFromBytes(data []byte, key *SecurityKey) []*PhevMessage {
 
 		p := &PhevMessage{}
 		if err := p.DecodeFromBytes(rawFrame, activeKey); err != nil {
-			log.Errorf("decode error: %v", err)
+			log.Errorf("%%PHEV_DECODE_ERROR%%: %v", err)
 			break
 		}
 		log.Tracef("%%PHEV_DECODED_FROM_BYTES%%: Raw: %s", hex.EncodeToString(decoded))
