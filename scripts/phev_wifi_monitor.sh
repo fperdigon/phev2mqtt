@@ -1,29 +1,16 @@
 #!/bin/bash
-# WiFi watchdog for phev2mqtt — runs every 15 minutes via cron.
-#
-# Monitors the car's WiFi connection and restarts phev2mqtt when the TCP
-# session to the car is missing or has gone silent.
-#
-# Cron entry (run as root):
-#   */15 * * * * /path/to/phev_wifi_monitor.sh
-#
-# Configuration: edit the variables below before deploying.
 
-# SSID of your car's WiFi hotspot (format: REMOTE<id>, shown in your car's menu)
 NETWORK_NAME="REMOTE<id>"
-
-# WiFi password printed on the car's WiFi setup screen (or your car manual)
 NETWORK_PASSWORD="your-car-wifi-password"
-
-# Car's onboard hotspot gateway — default 192.168.8.46 for Mitsubishi Outlander PHEV
 TARGET_IP=192.168.8.46
 TARGET_PORT=8080
-
-# WiFi interface name on the Raspberry Pi
 INTERFACE=wlan0
-
 LOGFILE=/var/log/phev_wifi_monitor.log
 LOCKFILE=/tmp/phev_wifi_monitor.lock
+
+# Counts consecutive "visible but failed to connect" events.
+# Cleared on every boot (lives in /tmp). Reset to 0 on any successful connection.
+FAIL_COUNT_FILE=/tmp/phev_reconnect_fail_count
 
 # Max ms since last data received before considering TCP session stale.
 # Car sends PINGs every ~1s; 5 minutes of silence = dead socket.
@@ -40,13 +27,48 @@ if ! flock -n 9; then
     exit 1
 fi
 
+reset_fail_count() {
+    echo 0 > "$FAIL_COUNT_FILE"
+}
+
+get_fail_count() {
+    cat "$FAIL_COUNT_FILE" 2>/dev/null || echo 0
+}
+
+# Reload the brcmfmac kernel module to clear a wedged SDIO firmware state.
+# The chip can scan (passive) but gets stuck mid-authentication after a
+# session drop; neither ip link, rfkill, nor nmcli can clear it — only a
+# full driver/firmware reinit works.
+# Sequence: unload brcmfmac_wcc (depends on brcmfmac) → unload brcmfmac →
+# reload brcmfmac → rescan → bring connection up explicitly.
+reload_driver() {
+    log "Driver stuck after $(get_fail_count) consecutive failures — reloading brcmfmac module..."
+    modprobe -r brcmfmac_wcc 2>/dev/null
+    modprobe -r brcmfmac 2>/dev/null
+    sleep 5
+    modprobe brcmfmac 2>/dev/null
+    sleep 8
+    nmcli device wifi rescan ifname "$INTERFACE" 2>/dev/null
+    sleep 3
+    if nmcli connection up "$NETWORK_NAME" 2>/dev/null; then
+        sleep 3
+        log "Module reload succeeded — reconnected to $NETWORK_NAME. Restarting phev2mqtt..."
+        systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+        reset_fail_count
+        return 0
+    else
+        log "Module reload did not restore connection."
+        return 1
+    fi
+}
+
 restart_wifi() {
     log "Reconnecting $INTERFACE to $NETWORK_NAME..."
     nmcli device disconnect "$INTERFACE" 2>/dev/null || true
     sleep 3
 
     # Primary: let NM autoconnect using the saved profile (reads PSK from
-    # /etc/NetworkManager/system-connections/${NETWORK_NAME}.nmconnection).
+    # /etc/NetworkManager/system-connections/REMOTE47fcta.nmconnection).
     # NM fires autoconnect within ~1s of disconnect.
     local i=0
     while [ $i -lt 10 ]; do
@@ -55,7 +77,8 @@ restart_wifi() {
             log "Reconnected to $NETWORK_NAME. Restarting phev2mqtt..."
             sleep 3
             systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
-            return
+            reset_fail_count
+            return 0
         fi
         i=$((i+1))
     done
@@ -66,8 +89,11 @@ restart_wifi() {
         log "Reconnected (explicit) to $NETWORK_NAME. Restarting phev2mqtt..."
         sleep 3
         systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+        reset_fail_count
+        return 0
     else
         log "Failed to connect to $NETWORK_NAME."
+        return 1
     fi
 }
 
@@ -77,6 +103,7 @@ restart_if_stuck() {
     if [ "$active_conn" -eq 0 ]; then
         log "WiFi up and car reachable, but phev2mqtt has no active TCP connection. Restarting..."
         systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+        reset_fail_count
         return
     fi
 
@@ -87,10 +114,12 @@ restart_if_stuck() {
     if [ -n "$lastrcv" ] && [ "$lastrcv" -gt "$STALE_THRESHOLD_MS" ]; then
         log "TCP session exists but no data received from car in $((lastrcv/1000))s. Restarting phev2mqtt..."
         systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+        reset_fail_count
         return
     fi
 
     log "All OK: connected to $NETWORK_NAME, $TARGET_IP reachable, phev2mqtt TCP session active."
+    reset_fail_count
 }
 
 # Force a fresh scan before checking
@@ -103,7 +132,19 @@ if [ -z "$network_status" ]; then
     available=$(nmcli device wifi list ifname "$INTERFACE" | grep "$NETWORK_NAME")
     if [ -n "$available" ]; then
         log "$NETWORK_NAME visible but not connected. Reconnecting..."
-        restart_wifi
+        if ! restart_wifi; then
+            fail_count=$(( $(get_fail_count) + 1 ))
+            echo "$fail_count" > "$FAIL_COUNT_FILE"
+            log "Reconnect failed (consecutive failures: $fail_count)."
+            # After 2 or 4 consecutive failures, try a module reload.
+            # After 6 failures (2 reloads both failed), reboot.
+            if [ "$fail_count" -eq 2 ] || [ "$fail_count" -eq 4 ]; then
+                reload_driver
+            elif [ "$fail_count" -ge 6 ]; then
+                log "Module reload failed repeatedly — rebooting to clear stuck SDIO state."
+                /sbin/reboot
+            fi
+        fi
     else
         log "$NETWORK_NAME not detected. Car may be out of range or off."
     fi
