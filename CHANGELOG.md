@@ -8,6 +8,35 @@ Issue numbers in parentheses refer to open issues in the
 
 ---
 
+## [Unreleased] — 2026-07-11
+
+### Fixed — WiFi driver stability
+
+- **brcmfmac SDIO firmware wedge recovery** (`scripts/phev_wifi_monitor.sh`):
+  Added `reload_driver()` function that performs a full kernel module reload
+  (`modprobe -r brcmfmac_wcc && modprobe -r brcmfmac && modprobe brcmfmac`) to
+  clear a wedged SDIO firmware RX path — a state where the car SSID is visible
+  but every WPA authentication attempt fails silently (symptom:
+  `brcmf_sdio_bus_rxctl: resumed on timeout` in dmesg). Neither interface
+  toggles nor NetworkManager restarts can recover this; only a driver reinit
+  works.
+- **Watchdog fail counter** (`scripts/phev_wifi_monitor.sh`): persistent counter
+  in `/tmp/phev_reconnect_fail_count` tracks consecutive "SSID visible but
+  reconnect failed" events across cron runs (cleared on reboot). Escalation:
+  fail 1 = log; fail 2 = module reload; fail 4 = second reload; fail 6+ = reboot.
+  Counter resets on any successful connection or "All OK" path.
+- **brcmfmac module parameters** (`scripts/brcmfmac.conf`): added
+  `/etc/modprobe.d/brcmfmac.conf` with `roamoff=1 feature_disable=0x82000` to
+  disable the firmware roaming engine and hand WPA authentication back to
+  wpa_supplicant — prevents the wedge from occurring in the first place.
+  `feature_disable=0x82000` disables FWSUP (firmware WPA supplicant, 0x2000)
+  and SAE (0x80000).
+- **Module unload order** (documented): `brcmfmac_wcc` must be unloaded before
+  `brcmfmac` because it holds a reference count on the parent module.
+  `nmcli connection up REMOTE47fcta` must be run explicitly after reload because
+  NM does not autoconnect when a module is reloaded (unlike after
+  `nmcli device disconnect`).
+
 ## [Unreleased] — 2026-07-04
 
 This fork incorporates all community contributions merged into upstream through
