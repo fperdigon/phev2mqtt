@@ -429,14 +429,11 @@ Uses a lock file to prevent parallel runs. Logs to `/var/log/phev_wifi_monitor.l
 ```sh
 # 1. Create /etc/phev/phev_wifi.env as described above
 
-# 2. Symlink the script so cron uses the repo copy directly
-sudo ln -s /home/pi/phev2mqtt/scripts/phev_wifi_monitor.sh /home/pi/phev_wifi_monitor.sh
-
-# 3. Install brcmfmac module parameters (prevents firmware wedge)
+# 2. Install brcmfmac module parameters (prevents firmware wedge)
 sudo cp scripts/brcmfmac.conf /etc/modprobe.d/brcmfmac.conf
 
-# 4. Add to root crontab (sudo crontab -e):
-# */15 * * * * /home/pi/phev_wifi_monitor.sh
+# 3. Add to root crontab (sudo crontab -e):
+# */15 * * * * /home/pi/phev2mqtt/scripts/phev_wifi_monitor.sh
 ```
 
 ### scripts/phev_conditional_reboot.sh
@@ -452,11 +449,8 @@ an active session. Uses the same lock file as the watchdog to prevent concurrent
 ```sh
 # 1. Create /etc/phev/phev_wifi.env as described above (shared with watchdog)
 
-# 2. Symlink the script so cron uses the repo copy directly
-sudo ln -sf /home/pi/phev2mqtt/scripts/phev_conditional_reboot.sh /usr/local/bin/phev-conditional-reboot.sh
-
-# 3. Add to root crontab (sudo crontab -e), staggered from the watchdog:
-# 2,32 * * * * /usr/local/bin/phev-conditional-reboot.sh
+# 2. Add to root crontab (sudo crontab -e), staggered from the watchdog:
+# 2,32 * * * * /home/pi/phev2mqtt/scripts/phev_conditional_reboot.sh
 ```
 
 **Logs** for both scripts are written to `/var/log/phev_wifi_monitor.log`.
