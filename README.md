@@ -452,9 +452,8 @@ an active session. Uses the same lock file as the watchdog to prevent concurrent
 ```sh
 # 1. Create /etc/phev/phev_wifi.env as described above (shared with watchdog)
 
-# 2. Install the script
-sudo cp scripts/phev_conditional_reboot.sh /usr/local/bin/phev-conditional-reboot.sh
-sudo chmod +x /usr/local/bin/phev-conditional-reboot.sh
+# 2. Symlink the script so cron uses the repo copy directly
+sudo ln -sf /home/pi/phev2mqtt/scripts/phev_conditional_reboot.sh /usr/local/bin/phev-conditional-reboot.sh
 
 # 3. Add to root crontab (sudo crontab -e), staggered from the watchdog:
 # 2,32 * * * * /usr/local/bin/phev-conditional-reboot.sh
