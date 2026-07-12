@@ -1,20 +1,22 @@
 #!/bin/bash
 
-NETWORK_NAME="REMOTE<id>"
-NETWORK_PASSWORD="your-car-wifi-password"
-TARGET_IP=192.168.8.46
-TARGET_PORT=8080
-INTERFACE=wlan0
-LOGFILE=/var/log/phev_wifi_monitor.log
-LOCKFILE=/tmp/phev_wifi_monitor.lock
+# Load site-specific configuration (credentials and endpoints — not in repo).
+# Override the path by setting PHEV_CONFIG in the environment before calling.
+CONFIG_FILE="${PHEV_CONFIG:-/etc/phev/phev_wifi.env}"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: config file not found: $CONFIG_FILE" >&2
+    echo "Copy scripts/phev_wifi.env.example to $CONFIG_FILE and fill in values." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
 
-# Counts consecutive "visible but failed to connect" events.
-# Cleared on every boot (lives in /tmp). Reset to 0 on any successful connection.
-FAIL_COUNT_FILE=/tmp/phev_reconnect_fail_count
-
-# Max ms since last data received before considering TCP session stale.
-# Car sends PINGs every ~1s; 5 minutes of silence = dead socket.
-STALE_THRESHOLD_MS=300000
+# Operational defaults — override in the config file if needed
+INTERFACE="${INTERFACE:-wlan0}"
+LOGFILE="${LOGFILE:-/var/log/phev_wifi_monitor.log}"
+LOCKFILE="${LOCKFILE:-/tmp/phev_wifi_monitor.lock}"
+FAIL_COUNT_FILE="${FAIL_COUNT_FILE:-/tmp/phev_reconnect_fail_count}"
+STALE_THRESHOLD_MS="${STALE_THRESHOLD_MS:-300000}"
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOGFILE"
@@ -40,7 +42,8 @@ get_fail_count() {
 # session drop; neither ip link, rfkill, nor nmcli can clear it — only a
 # full driver/firmware reinit works.
 # Sequence: unload brcmfmac_wcc (depends on brcmfmac) → unload brcmfmac →
-# reload brcmfmac → rescan → bring connection up explicitly.
+# reload brcmfmac → disable power save (re-enabled by default on load) →
+# rescan → bring connection up explicitly.
 reload_driver() {
     log "Driver stuck after $(get_fail_count) consecutive failures — reloading brcmfmac module..."
     modprobe -r brcmfmac_wcc 2>/dev/null
@@ -69,7 +72,7 @@ restart_wifi() {
     sleep 3
 
     # Primary: let NM autoconnect using the saved profile (reads PSK from
-    # /etc/NetworkManager/system-connections/REMOTE47fcta.nmconnection).
+    # /etc/NetworkManager/system-connections/$NETWORK_NAME.nmconnection).
     # NM fires autoconnect within ~1s of disconnect.
     local i=0
     while [ $i -lt 10 ]; do
