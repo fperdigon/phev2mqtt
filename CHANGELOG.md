@@ -36,6 +36,12 @@ Issue numbers in parentheses refer to open issues in the
   `nmcli connection up REMOTE47fcta` must be run explicitly after reload because
   NM does not autoconnect when a module is reloaded (unlike after
   `nmcli device disconnect`).
+- **Power save disabled after module reload and on every watchdog run**
+  (`scripts/phev_wifi_monitor.sh`): `brcmfmac` re-enables power save on every
+  module load, putting `wlan0` into a dormant/no-carrier state that suppresses
+  active scanning. Added `/usr/sbin/iw dev wlan0 set power_save off` inside
+  `reload_driver()` (after the firmware settle sleep) and at the top of the main
+  watchdog body so the interface stays in active-scan mode on every cron run.
 
 ## [Unreleased] — 2026-07-04
 
