@@ -1,30 +1,30 @@
 #!/bin/bash
-# Daily maintenance reboot for phev2mqtt — runs every 30 minutes via cron.
-#
-# Reboots the Raspberry Pi once per calendar day, but ONLY when the car is
-# not connected. This resets the WiFi driver and clears any kernel state
-# that accumulates over time, improving long-term reliability.
-#
-# The reboot is deferred (retried every 30 min) until the car disconnects,
-# so it never interrupts an active session.
+
+# Reboot the RPi once per day when the car is not connected.
+# Runs every 30 minutes via cron (staggered to :02 and :32 to avoid
+# firing at the same second as the watchdog).
 #
 # Uses the same lock file as phev_wifi_monitor.sh to prevent concurrent
-# execution — if the watchdog is mid-reconnect, waits up to 120s.
+# execution — if the watchdog is mid-reconnect, we wait up to 120s for
+# it to finish before checking car status.
 #
-# Cron entry (run as root, staggered to avoid firing at same time as watchdog):
-#   2,32 * * * * /path/to/phev_conditional_reboot.sh
-#
-# Configuration: set NETWORK_NAME to match your car's WiFi SSID.
+# Car presence check uses OR logic: only reboots if BOTH the NM connection
+# is inactive AND TARGET_IP is unreachable — a single glitch can't
+# trigger an unwanted reboot.
 
-# SSID of your car's WiFi hotspot (format: REMOTE<id>, shown in your car's menu)
-NETWORK_NAME="REMOTE<id>"
+# Load site-specific configuration (shared with phev_wifi_monitor.sh)
+CONFIG_FILE="${PHEV_CONFIG:-/etc/phev/phev_wifi.env}"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: config file not found: $CONFIG_FILE" >&2
+    echo "Copy scripts/phev_wifi.env.example to $CONFIG_FILE and fill in values." >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
 
-# Car's onboard hotspot gateway — default 192.168.8.46 for Mitsubishi Outlander PHEV
-TARGET_IP=192.168.8.46
-
-LOGFILE="/var/log/phev_wifi_monitor.log"
+LOGFILE="${LOGFILE:-/var/log/phev_wifi_monitor.log}"
 REBOOT_STAMP="/var/lib/phev-reboot-stamp"
-LOCKFILE="/tmp/phev_wifi_monitor.lock"
+LOCKFILE="${LOCKFILE:-/tmp/phev_wifi_monitor.lock}"
 TODAY=$(date +%Y-%m-%d)
 
 log() {

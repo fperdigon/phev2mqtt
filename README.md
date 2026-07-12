@@ -364,32 +364,78 @@ be useful for sniffing the app.
 
 ## Auxiliary Scripts
 
-The `scripts/` directory contains two maintenance scripts for Raspberry Pi deployments.
-Both use `systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt` (never a direct
-restart) so the car's WiFi driver has time to settle between operations.
+The `scripts/` directory contains maintenance scripts for Raspberry Pi deployments.
+Both scripts use `systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt`
+(never a direct `restart`) so the car's TCP server has time to reset between connections.
 
-**Before deploying either script**, edit the configuration variables at the top of the file:
-- `NETWORK_NAME` — your car's WiFi SSID (format `REMOTE<id>`, visible in your car's WiFi setup menu)
-- `NETWORK_PASSWORD` — the WiFi password from your car's setup screen
+> **These scripts must run as root.** They call `modprobe`, `systemctl`, `nmcli device wifi rescan`,
+> and `/sbin/reboot` — all of which require root privileges. Deploy them via root's crontab
+> (`sudo crontab -e`), not the `pi` user's crontab.
+
+### Configuration — /etc/phev/phev_wifi.env
+
+Both scripts load credentials and network addresses from a shared config file that is
+**not in the repo** (it contains your car's WiFi password). Create it once:
+
+```sh
+sudo mkdir -p /etc/phev
+sudo tee /etc/phev/phev_wifi.env << 'EOF'
+# Car WiFi hotspot — SSID visible in the car's Remote Control WiFi setup menu
+NETWORK_NAME=REMOTE<id>
+NETWORK_PASSWORD=<car-wifi-password>
+
+# Car's onboard TCP server (default for Mitsubishi Outlander PHEV)
+TARGET_IP=192.168.8.46
+TARGET_PORT=8080
+EOF
+sudo chmod 600 /etc/phev/phev_wifi.env   # readable by root only
+sudo chown root:root /etc/phev/phev_wifi.env
+```
+
+See `scripts/phev_wifi.env.example` for a template. The config path can be overridden
+at runtime with the `PHEV_CONFIG` environment variable (useful for testing):
+
+```sh
+sudo PHEV_CONFIG=/tmp/test.env /home/pi/phev2mqtt/scripts/phev_wifi_monitor.sh
+```
+
+Optional settings you can add to the config file to override script defaults:
+
+```sh
+# INTERFACE=wlan0
+# LOGFILE=/var/log/phev_wifi_monitor.log
+# LOCKFILE=/tmp/phev_wifi_monitor.lock
+# FAIL_COUNT_FILE=/tmp/phev_reconnect_fail_count
+# STALE_THRESHOLD_MS=300000
+```
 
 ### scripts/phev_wifi_monitor.sh
 
-WiFi watchdog that recovers from common failure modes automatically.
+WiFi watchdog that recovers from common failure modes automatically. Run every 15 minutes
+via root's crontab.
 
 What it does:
 - If the car's SSID is visible but not connected → reconnects via nmcli
-- If connected but the car's gateway (`192.168.8.46`) is unreachable → reconnects
+- If connected but the car's gateway is unreachable → reconnects
 - If connected and reachable but phev2mqtt has no active TCP session → restarts the service
-- If a TCP session exists but no data has been received in 5 minutes → restarts the service
+- If a TCP session exists but no data received in 5 minutes → restarts the service
+- After 2 or 4 consecutive reconnect failures → reloads the `brcmfmac` kernel module
+  (clears firmware wedge state where the SSID is visible but authentication always fails)
+- After 6 consecutive failures → reboots the Pi
 
-Uses a lock file (`/tmp/phev_wifi_monitor.lock`) to prevent parallel runs.
+Uses a lock file to prevent parallel runs. Logs to `/var/log/phev_wifi_monitor.log`.
 
 **Deploy:**
 ```sh
-sudo cp scripts/phev_wifi_monitor.sh /home/pi/phev_wifi_monitor.sh
-# Edit NETWORK_NAME and NETWORK_PASSWORD at the top
-sudo chmod +x /home/pi/phev_wifi_monitor.sh
-# Add to root crontab (sudo crontab -e):
+# 1. Create /etc/phev/phev_wifi.env as described above
+
+# 2. Symlink the script so cron uses the repo copy directly
+sudo ln -s /home/pi/phev2mqtt/scripts/phev_wifi_monitor.sh /home/pi/phev_wifi_monitor.sh
+
+# 3. Install brcmfmac module parameters (prevents firmware wedge)
+sudo cp scripts/brcmfmac.conf /etc/modprobe.d/brcmfmac.conf
+
+# 4. Add to root crontab (sudo crontab -e):
 # */15 * * * * /home/pi/phev_wifi_monitor.sh
 ```
 
@@ -400,16 +446,17 @@ Daily maintenance reboot that only fires when the car is not connected.
 Rebooting the Pi once per day resets the WiFi driver and clears accumulated kernel
 state that can cause silent connection failures after many days of uptime. The reboot
 is deferred in 30-minute increments until the car is absent, so it never interrupts
-an active session.
-
-Also uses the same lock file as the watchdog to prevent concurrent execution.
+an active session. Uses the same lock file as the watchdog to prevent concurrent execution.
 
 **Deploy:**
 ```sh
+# 1. Create /etc/phev/phev_wifi.env as described above (shared with watchdog)
+
+# 2. Install the script
 sudo cp scripts/phev_conditional_reboot.sh /usr/local/bin/phev-conditional-reboot.sh
-# Edit NETWORK_NAME at the top
 sudo chmod +x /usr/local/bin/phev-conditional-reboot.sh
-# Add to root crontab (sudo crontab -e), staggered from the watchdog:
+
+# 3. Add to root crontab (sudo crontab -e), staggered from the watchdog:
 # 2,32 * * * * /usr/local/bin/phev-conditional-reboot.sh
 ```
 
