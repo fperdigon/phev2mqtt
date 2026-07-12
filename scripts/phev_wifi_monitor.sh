@@ -48,6 +48,7 @@ reload_driver() {
     sleep 5
     modprobe brcmfmac 2>/dev/null
     sleep 8
+    /usr/sbin/iw dev "$INTERFACE" set power_save off 2>/dev/null
     nmcli device wifi rescan ifname "$INTERFACE" 2>/dev/null
     sleep 3
     if nmcli connection up "$NETWORK_NAME" 2>/dev/null; then
@@ -123,6 +124,7 @@ restart_if_stuck() {
 }
 
 # Force a fresh scan before checking
+/usr/sbin/iw dev "$INTERFACE" set power_save off 2>/dev/null
 nmcli device wifi rescan ifname "$INTERFACE" 2>/dev/null
 sleep 3
 
