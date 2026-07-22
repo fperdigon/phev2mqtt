@@ -213,3 +213,26 @@ Both scripts require configuring `NETWORK_NAME` and (for the watchdog)
   the startup Info message already covers this.
 - **Typo fix** (`cmd/mqtt.go`): `"vechicle"` -> `"vehicle"` in the
   `mqtt_disable_register_set_command` flag description and log message.
+
+## [Unreleased] — 2026-07-19
+
+### Improved — WiFi watchdog brcmfmac wedge recovery
+
+- **Immediate wedge detection** (`scripts/phev_wifi_monitor.sh`): added
+  `is_auth_wedge()` which queries `journalctl -u NetworkManager --since "-3min"`
+  for `"association took too long"` — the definitive NM log signature that the
+  brcmfmac SDIO firmware is wedged (chip can scan but cannot complete the WPA
+  4-way handshake). Previously the watchdog waited for fail count 2 (two
+  consecutive 15-minute cron cycles, 15–30 min delay) before triggering
+  `reload_driver()`. Now `is_auth_wedge()` is called immediately after the first
+  `restart_wifi()` failure; if the wedge is confirmed, `reload_driver()` fires
+  right away. Non-wedge failures still escalate via the existing fail counter.
+- **`reload_driver()` 3-retry loop**: replaced the single `nmcli connection up`
+  attempt with a loop of up to 3 attempts, each preceded by a fresh
+  `nmcli device wifi rescan`, with 10-second gaps between attempts. The car's AP
+  is intermittent after parking; a ~40-second retry window reliably catches it.
+- **Reduced reload sleeps**: pre-load sleep reduced 5 s → 3 s, post-load sleep
+  reduced 8 s → 5 s to leave more time within the car's AP broadcast window.
+- **Wedge-specific reboot escalation**: if `is_auth_wedge()` is true and all 3
+  reload attempts fail and fail count ≥ 4, the script reboots immediately instead
+  of waiting for fail count 6.
