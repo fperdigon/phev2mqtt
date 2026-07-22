@@ -37,33 +37,50 @@ get_fail_count() {
     cat "$FAIL_COUNT_FILE" 2>/dev/null || echo 0
 }
 
+# Returns 0 if NM recently reported "association took too long" — the
+# definitive signature of a brcmfmac SDIO firmware wedge where the chip
+# can scan but cannot complete the WPA 4-way handshake.
+is_auth_wedge() {
+    journalctl -u NetworkManager --since "-3min" --no-pager 2>/dev/null | \
+        grep -q "association took too long"
+}
+
 # Reload the brcmfmac kernel module to clear a wedged SDIO firmware state.
 # The chip can scan (passive) but gets stuck mid-authentication after a
 # session drop; neither ip link, rfkill, nor nmcli can clear it — only a
 # full driver/firmware reinit works.
 # Sequence: unload brcmfmac_wcc (depends on brcmfmac) → unload brcmfmac →
 # reload brcmfmac → disable power save (re-enabled by default on load) →
-# rescan → bring connection up explicitly.
+# rescan → retry connection up to 3 times (car AP is intermittent).
 reload_driver() {
-    log "Driver stuck after $(get_fail_count) consecutive failures — reloading brcmfmac module..."
+    log "Auth wedge confirmed — reloading brcmfmac module (consecutive failures: $(get_fail_count))..."
     modprobe -r brcmfmac_wcc 2>/dev/null
     modprobe -r brcmfmac 2>/dev/null
-    sleep 5
-    modprobe brcmfmac 2>/dev/null
-    sleep 8
-    /usr/sbin/iw dev "$INTERFACE" set power_save off 2>/dev/null
-    nmcli device wifi rescan ifname "$INTERFACE" 2>/dev/null
     sleep 3
-    if nmcli connection up "$NETWORK_NAME" 2>/dev/null; then
+    modprobe brcmfmac 2>/dev/null
+    sleep 5
+    /usr/sbin/iw dev "$INTERFACE" set power_save off 2>/dev/null
+
+    # Retry connection up to 3 times — the car's AP is intermittent after
+    # parking and may not respond on the first attempt post-reload.
+    local attempt=1
+    while [ $attempt -le 3 ]; do
+        nmcli device wifi rescan ifname "$INTERFACE" 2>/dev/null
         sleep 3
-        log "Module reload succeeded — reconnected to $NETWORK_NAME. Restarting phev2mqtt..."
-        systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
-        reset_fail_count
-        return 0
-    else
-        log "Module reload did not restore connection."
-        return 1
-    fi
+        if nmcli connection up "$NETWORK_NAME" 2>/dev/null; then
+            sleep 3
+            log "Module reload succeeded (attempt $attempt/3) — reconnected to $NETWORK_NAME. Restarting phev2mqtt..."
+            systemctl stop phev2mqtt && sleep 5 && systemctl start phev2mqtt
+            reset_fail_count
+            return 0
+        fi
+        log "Connection attempt $attempt/3 failed after module reload."
+        attempt=$((attempt + 1))
+        [ $attempt -le 3 ] && sleep 10
+    done
+
+    log "Module reload did not restore connection after 3 attempts."
+    return 1
 }
 
 restart_wifi() {
@@ -141,13 +158,27 @@ if [ -z "$network_status" ]; then
             fail_count=$(( $(get_fail_count) + 1 ))
             echo "$fail_count" > "$FAIL_COUNT_FILE"
             log "Reconnect failed (consecutive failures: $fail_count)."
-            # After 2 or 4 consecutive failures, try a module reload.
-            # After 6 failures (2 reloads both failed), reboot.
-            if [ "$fail_count" -eq 2 ] || [ "$fail_count" -eq 4 ]; then
-                reload_driver
-            elif [ "$fail_count" -ge 6 ]; then
-                log "Module reload failed repeatedly — rebooting to clear stuck SDIO state."
-                /sbin/reboot
+
+            # If NM reported "association took too long" this is definitively
+            # the brcmfmac auth wedge — reload immediately regardless of fail count.
+            if is_auth_wedge; then
+                log "Auth wedge detected — triggering immediate module reload."
+                if ! reload_driver; then
+                    # Reload failed: if we've now hit 4+ failures reboot, else wait
+                    if [ "$fail_count" -ge 4 ]; then
+                        log "Module reload failed repeatedly — rebooting to clear stuck SDIO state."
+                        /sbin/reboot
+                    fi
+                fi
+            else
+                # Non-wedge failure (SSID visible but association never started):
+                # escalate via fail counter as before.
+                if [ "$fail_count" -eq 2 ] || [ "$fail_count" -eq 4 ]; then
+                    reload_driver
+                elif [ "$fail_count" -ge 6 ]; then
+                    log "Repeated failures — rebooting to clear stuck state."
+                    /sbin/reboot
+                fi
             fi
         fi
     else
